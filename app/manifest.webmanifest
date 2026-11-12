@@ -1,0 +1,26 @@
+{
+  "name": "S&B Fabrics Staff",
+  "short_name": "S&B Staff",
+  "description": "Staff app for S&B Fabrics: till, stock, orders, quotations and invoices",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f6f4ef",
+  "theme_color": "#2b2b2b",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "id": "sandbfabrics-staff"
+}
