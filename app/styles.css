@@ -587,3 +587,26 @@ details.rcpt summary { cursor: pointer; font-weight: 650; color: var(--text-2); 
 [data-theme=dark] .update-card { background: #052e22; border-color: #065f46; }
 .auth > .install-card, .auth > .update-card { margin: .9rem 1.25rem 0; }
 .update-card .btn.primary { background: #059669; border-color: #059669; box-shadow: none; }
+
+/* v1.7 phone cart sheet + sold-out */
+.prod.out { opacity: .55; filter: grayscale(.7); box-shadow: none; }
+.prod.out:disabled { opacity: .5; }
+.prod .outpill { position: absolute; left: 8px; top: 8px; background: #374151; color: #fff; font-size: .68rem; font-weight: 800; padding: .15rem .5rem; border-radius: 999px; }
+.soldout-head { grid-column: 1 / -1; font-size: .78rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted, #6b7280);
+  margin: .6rem 0 -.2rem; display: flex; align-items: center; gap: .6rem; }
+.soldout-head::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.sheet-more { display: none; }
+.cart-backdrop { display: none; }
+@media (max-width: 899px) {
+  .cart-backdrop { display: block; position: fixed; inset: 0; background: rgba(15, 23, 42, .45); backdrop-filter: blur(2px); z-index: 44; animation: fade .18s; }
+  .cart-panel.sheet-open { position: fixed; left: 0; right: 0; bottom: 0; z-index: 45; max-height: 92vh; overflow: auto; overscroll-behavior: contain;
+    animation: sheetUp .24s cubic-bezier(.2, .8, .2, 1); padding-bottom: env(safe-area-inset-bottom); }
+  .cart-panel.sheet-open .card { border-radius: 26px 26px 0 0; margin: 0; box-shadow: 0 -12px 40px rgba(0,0,0,.18); }
+  .cart-panel.sheet-open .card::before { content: ""; display: block; width: 44px; height: 5px; border-radius: 99px; background: var(--line); margin: .55rem auto 0; }
+  .cart-panel.sheet-open .cart-lines { max-height: 42vh; }
+  .sheet-more { display: flex; align-items: center; justify-content: center; gap: .4rem; width: calc(100% - 2.2rem); margin: 0 1.1rem .5rem;
+    padding: .65rem; border: 1.5px dashed color-mix(in srgb, var(--brand) 45%, var(--line)); border-radius: 14px; background: var(--brand-tint);
+    color: var(--brand-ink); font: inherit; font-weight: 700; cursor: pointer; }
+  .cart-panel.sheet-open .sheet-x { width: 40px; height: 40px; background: var(--surface-2); border-radius: 50%; }
+}
+@keyframes sheetUp { from { transform: translateY(100%); } to { transform: none; } }

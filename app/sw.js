@@ -1,6 +1,6 @@
 // Service worker: keeps the app shell available offline. API calls (to script.google.com) are never cached.
 // It only touches its own cache and its own folder, so other apps on the same web address are never affected.
-const CACHE = 'sandbfabrics-staff-v1.5.0';
+const CACHE = 'sandbfabrics-staff-v1.5.1';
 const PREFIX = CACHE.replace(/v[\d.]+$/, '');
 const SCOPE = self.registration.scope;
 const NAME = CACHE + '@' + SCOPE;

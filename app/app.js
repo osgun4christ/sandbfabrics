@@ -3,7 +3,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 const PIN_ROUNDS_DEFAULT = 100;
 const ICON_SRC = (typeof window !== 'undefined' && window.SM_ICON) || 'icons/icon-192.png';
 const AUTO_SYNC_MS = 120000;   // push + pull every 2 minutes while the app is open
@@ -487,6 +487,8 @@ function updateBanner() {
     <div class="small">Takes a few seconds. Your sales and data stay safe.</div></div>
     <button class="btn primary sm" data-act="app-update">Update now</button></div>`;
 }
+// the phone's Back button closes the cart sheet instead of leaving the app
+window.addEventListener('popstate', () => { if (S.ui && S.ui.showCart) { S.ui.showCart = false; render(); } });
 const INSTALL_ACTS = {
   'install-app': async () => {
     if (!installEvt) return;
@@ -668,9 +670,10 @@ function viewPOS() {
       <div class="searchbox">${icon('search')}<input id="pos-search" type="text" placeholder="Search products, SKU or barcode" value="${esc(S.ui.q)}" data-input="pos-search" autocomplete="off"></div>
       <div class="chips">${cats.map((c) => `<button class="chip-f ${S.ui.cat === c ? 'on' : ''}" data-act="cat" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div>
       <div id="pos-grid">${posGrid()}</div>
-      ${n ? `<div class="cartbar"><span class="count">${n}</span><button class="btn accent big" data-act="show-cart">Review sale · ${fmtUSD(t.total)}</button></div>` : ''}
+      ${n && !S.ui.showCart ? `<div class="cartbar"><span class="count">${n}</span><button class="btn accent big" data-act="show-cart">Review sale · ${fmtUSD(t.total)}</button></div>` : ''}
     </section>
-    <aside class="cart-panel ${S.ui.showCart ? '' : 'mobile-hidden'}" id="cart-panel">${cartPanel()}</aside>
+    ${S.ui.showCart ? '<div class="cart-backdrop" data-act="hide-cart"></div>' : ''}
+    <aside class="cart-panel ${S.ui.showCart ? 'sheet-open' : 'mobile-hidden'}" id="cart-panel">${cartPanel()}</aside>
   </div>`;
 }
 
@@ -682,20 +685,25 @@ function posGrid() {
   const list = sellable().filter((p) => (S.ui.cat === 'All' || p.Category === S.ui.cat) &&
     (!q || (p.Name + ' ' + p.SKU + ' ' + p.Barcode).toLowerCase().indexOf(q) >= 0));
   if (!list.length) return `<div class="card empty">${icon('search')}No products match “${esc(S.ui.q)}”.</div>`;
-  return `<div class="products">${list.map((p) => {
+  // products that are sold out go to the end of the list
+  const inStock = list.filter((p) => (stock[p.ProductID] || 0) > 0);
+  const soldOut = list.filter((p) => (stock[p.ProductID] || 0) <= 0);
+  const ordered = inStock.concat(soldOut);
+  return `<div class="products">${ordered.map((p, k) => {
     const qty = stock[p.ProductID] || 0;
     const low = qty <= num(p.ReorderLevel);
     const badge = qty <= 0 ? 'bad' : low ? 'warn' : 'ok';
     const cc = catColor(p.Name);
     const img = p.ImageURL ? (/lh3\.googleusercontent\.com\/d\/[\w-]+$/.test(p.ImageURL) ? p.ImageURL + '=w300' : p.ImageURL) : '';
     const sale = num(p.RegularPrice) > num(p.SellingPrice);
-    return `<button class="prod" data-act="add" data-id="${esc(p.ProductID)}" ${qty <= 0 && !allowNeg ? 'disabled' : ''}>
+    const out = qty <= 0;
+    return `${out && k === inStock.length && inStock.length ? '<div class="soldout-head">Sold out</div>' : ''}<button class="prod ${out ? 'out' : ''}" data-act="add" data-id="${esc(p.ProductID)}" ${out && !allowNeg ? 'disabled' : ''}>
       <span class="thumb" style="--c1:${cc[0]};--c2:${cc[1]}">${img ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}<b>${esc(initials(p.Name))}</b>
-        ${inCart[p.ProductID] ? `<span class="incart">${fmtQty(inCart[p.ProductID])}</span>` : `<span class="addplus">${icon('plus', 'sm')}</span>`}
-        ${sale ? '<span class="salepill">Sale</span>' : ''}</span>
+        ${inCart[p.ProductID] ? `<span class="incart">${fmtQty(inCart[p.ProductID])}</span>` : out && !allowNeg ? '' : `<span class="addplus">${icon('plus', 'sm')}</span>`}
+        ${sale && !out ? '<span class="salepill">Sale</span>' : ''}${out ? '<span class="outpill">Sold out</span>' : ''}</span>
       <span class="n">${esc(p.Name)}</span>
       <span class="foot"><span class="p">${fmtCur(p.SellingPrice, p.PriceCurrency)}${sale ? ` <s>${fmtCur(p.RegularPrice, p.PriceCurrency)}</s>` : ''}</span>
-      <span class="stk ${badge}">${fmtQty(qty)} ${esc(p.Unit || '')}</span></span></button>`;
+      <span class="stk ${badge}">${out ? 'None left' : fmtQty(qty) + ' ' + esc(p.Unit || '')}</span></span></button>`;
   }).join('')}</div>`;
 }
 
@@ -713,7 +721,8 @@ function cartPanel() {
   return `<div class="card">
     <div class="cart-head"><h3>Current sale</h3>
       <span class="row">${S.cart.lines.length ? `<button class="btn ghost sm" data-act="clear-cart">${icon('trash', 'sm')} Clear</button>` : ''}
-      <button class="btn ghost icon sm" data-act="hide-cart" style="display:${S.ui.showCart ? 'inline-flex' : 'none'}">${icon('x')}</button></span></div>
+      <button class="btn ghost icon sm sheet-x" data-act="hide-cart" title="Back to products" style="display:${S.ui.showCart ? 'inline-flex' : 'none'}">${icon('x')}</button></span></div>
+    ${S.ui.showCart ? `<button class="sheet-more" data-act="hide-cart">${icon('plus', 'sm')} Add more products</button>` : ''}
     ${S.cart.orderId ? `<div class="order-banner">${icon('bag', 'sm')} <span>Online order <b>${esc(S.cart.orderNo)}</b>${S.cart.orderFee && S.cart.orderFee.fee ? ` · collect delivery fee <b>${fmtCur(S.cart.orderFee.fee, S.cart.orderFee.currency)}</b> too (recorded automatically)` : ''}</span></div>` : ''}
     <div class="cart-lines">${S.cart.lines.length ? S.cart.lines.map((l, i) => `<div class="cart-line">
         <div><div class="n">${esc(l.name)}</div><div class="muted small">${fmtCur(l.unitPrice, l.priceCurrency)} / ${esc(l.unit || 'unit')}</div></div>
@@ -746,7 +755,8 @@ function addToCart(pid) {
   const ex = S.cart.lines.find((l) => l.productId === pid);
   const stock = stockMap()[pid] || 0;
   const want = (ex ? ex.qty : 0) + (isYard(p) ? 1 : 1);
-  if (want > stock && !bool(setting('AllowNegativeStock'))) { toast('Only ' + fmtQty(stock) + ' ' + (p.Unit || '') + ' in stock', 'bad'); return; }
+  if (want > stock && !bool(setting('AllowNegativeStock'))) { toast(stock > 0 ? 'Only ' + fmtQty(stock) + ' ' + (p.Unit || '') + ' in stock' : p.Name + ' is sold out', 'bad'); return; }
+  if (want > stock) toast('Stock shows ' + fmtQty(Math.max(0, stock)) + ' — the sale will be marked for the owner to check', 'bad');
   if (ex) ex.qty = r2(ex.qty + 1);
   else S.cart.lines.push({ productId: pid, name: p.Name, unit: p.Unit, qty: 1, step, unitPrice: num(p.SellingPrice), priceCurrency: p.PriceCurrency });
   render();
@@ -1803,8 +1813,14 @@ const ACT = {
   },
   remove: (el) => { S.cart.lines.splice(+el.dataset.i, 1); render(); },
   'clear-cart': () => { S.cart = { lines: [], discountUSD: 0, customerId: '' }; render(); },
-  'show-cart': () => { S.ui.showCart = true; render(); },
-  'hide-cart': () => { S.ui.showCart = false; render(); },
+  'show-cart': () => {
+    S.ui.showCart = true; render();
+    try { if (!GAS) history.pushState({ sheet: 'cart' }, ''); } catch (e) { /* ignore */ }
+  },
+  'hide-cart': () => {
+    try { if (!GAS && history.state && history.state.sheet === 'cart') { history.back(); return; } } catch (e) { /* ignore */ }
+    S.ui.showCart = false; render();
+  },
   discount: () => {
     const t = cartTotals();
     const lim = num(setting('DiscountLimitPct'));
