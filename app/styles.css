@@ -598,9 +598,11 @@ details.rcpt summary { cursor: pointer; font-weight: 650; color: var(--text-2); 
 .sheet-more { display: none; }
 .cart-backdrop { display: none; }
 @media (max-width: 899px) {
-  .cart-backdrop { display: block; position: fixed; inset: 0; background: rgba(15, 23, 42, .45); backdrop-filter: blur(2px); z-index: 44; animation: fade .18s; }
+  .cart-backdrop { display: block; position: fixed; inset: 0; background: rgba(15, 23, 42, .45); z-index: 44; }
+  .cart-backdrop.anim { animation: fade .18s; }
   .cart-panel.sheet-open { position: fixed; left: 0; right: 0; bottom: 0; z-index: 45; max-height: 92vh; overflow: auto; overscroll-behavior: contain;
-    animation: sheetUp .24s cubic-bezier(.2, .8, .2, 1); padding-bottom: env(safe-area-inset-bottom); }
+    padding-bottom: env(safe-area-inset-bottom); }
+  .cart-panel.sheet-open.anim { animation: sheetUp .24s cubic-bezier(.2, .8, .2, 1); }
   .cart-panel.sheet-open .card { border-radius: 26px 26px 0 0; margin: 0; box-shadow: 0 -12px 40px rgba(0,0,0,.18); }
   .cart-panel.sheet-open .card::before { content: ""; display: block; width: 44px; height: 5px; border-radius: 99px; background: var(--line); margin: .55rem auto 0; }
   .cart-panel.sheet-open .cart-lines { max-height: 42vh; }
@@ -610,3 +612,6 @@ details.rcpt summary { cursor: pointer; font-weight: 650; color: var(--text-2); 
   .cart-panel.sheet-open .sheet-x { width: 40px; height: 40px; background: var(--surface-2); border-radius: 50%; }
 }
 @keyframes sheetUp { from { transform: translateY(100%); } to { transform: none; } }
+
+.btn.danger-soft { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
+.void-sum { background: var(--surface-2); border-radius: 12px; padding: .7rem .85rem; font-size: .92rem; }

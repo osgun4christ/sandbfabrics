@@ -3,7 +3,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.5.2';
 const PIN_ROUNDS_DEFAULT = 100;
 const ICON_SRC = (typeof window !== 'undefined' && window.SM_ICON) || 'icons/icon-192.png';
 const AUTO_SYNC_MS = 120000;   // push + pull every 2 minutes while the app is open
@@ -392,12 +392,21 @@ function defaultView() {
 /* =====================================================================
  * Rendering
  * ===================================================================== */
+let rendering = false;
 function render() {
+  // a field losing focus while the screen is being redrawn can ask for another redraw: do it right after
+  if (rendering) { setTimeout(render, 0); return; }
+  rendering = true;
+  try { renderNow(); } finally { rendering = false; }
+}
+function renderNow() {
   applyTheme();
   const app = $('#app');
   const active = document.activeElement;
   const keepId = active && active.id;
   const caret = active && typeof active.selectionStart === 'number' ? active.selectionStart : null;
+  // remember where each scrolling area was, so updating the screen doesn't make it jump
+  const scrolls = ['.main', '#cart-panel', '.cart-lines'].map((q) => { const e = $(q); return e ? [q, e.scrollTop] : null; }).filter(Boolean);
   if (!S.cfg || !S.snap) app.innerHTML = viewDeviceSetup();
   else if (!S.session) app.innerHTML = viewLogin();
   else app.innerHTML = viewShell();
@@ -405,6 +414,8 @@ function render() {
     const el = document.getElementById(keepId);
     if (el) { el.focus(); try { if (caret !== null) el.setSelectionRange(caret, caret); } catch (e) { /* ignore */ } }
   }
+  scrolls.forEach(([q, top]) => { const e = $(q); if (e) e.scrollTop = top; });
+  S.ui.sheetAnim = false;
 }
 
 function renderStatus() {
@@ -672,8 +683,8 @@ function viewPOS() {
       <div id="pos-grid">${posGrid()}</div>
       ${n && !S.ui.showCart ? `<div class="cartbar"><span class="count">${n}</span><button class="btn accent big" data-act="show-cart">Review sale · ${fmtUSD(t.total)}</button></div>` : ''}
     </section>
-    ${S.ui.showCart ? '<div class="cart-backdrop" data-act="hide-cart"></div>' : ''}
-    <aside class="cart-panel ${S.ui.showCart ? 'sheet-open' : 'mobile-hidden'}" id="cart-panel">${cartPanel()}</aside>
+    ${S.ui.showCart ? `<div class="cart-backdrop ${S.ui.sheetAnim ? 'anim' : ''}" data-act="hide-cart"></div>` : ''}
+    <aside class="cart-panel ${S.ui.showCart ? 'sheet-open' + (S.ui.sheetAnim ? ' anim' : '') : 'mobile-hidden'}" id="cart-panel">${cartPanel()}</aside>
   </div>`;
 }
 
@@ -748,6 +759,15 @@ function cartPanel() {
   </div>`;
 }
 
+/** How much of this line's product is in stock (other cart lines of the same product don't exist: one line per product). */
+function stockLeft(l) { return stockMap()[l.productId] || 0; }
+function stockOk(l, want) {
+  const have = stockLeft(l);
+  if (want <= have) return true;
+  if (bool(setting('AllowNegativeStock'))) { toast('Stock shows ' + fmtQty(Math.max(0, have)) + ' ' + (l.unit || '') + ' — the sale will be marked for the owner to check', 'bad'); return true; }
+  toast('Only ' + fmtQty(Math.max(0, have)) + ' ' + (l.unit || '') + ' of ' + l.name + ' in stock', 'bad');
+  return false;
+}
 function addToCart(pid) {
   const p = productById(pid);
   if (!p) return;
@@ -893,7 +913,8 @@ function receiptModal(r) {
     <div class="grid2" style="margin-top:1rem">
       <button class="btn" data-act="print" data-id="${esc(r.id)}">${icon('printer')} Print</button>
       <button class="btn" data-act="sale-doc" data-id="${esc(r.id)}">${icon('share')} PDF · share · e-mail</button></div>
-    <button class="btn primary block" style="margin-top:.6rem" data-act="close">New sale ${icon('arrow')}</button>`;
+    <button class="btn primary block" style="margin-top:.6rem" data-act="close">New sale ${icon('arrow')}</button>
+    <button class="btn ghost block sm" style="margin-top:.4rem" data-act="void-open" data-id="${esc(r.id)}">Made a mistake? Correct this sale</button>`;
 }
 
 /* ---------- customer picker ---------- */
@@ -1808,13 +1829,14 @@ const ACT = {
   qty: (el) => {
     const l = S.cart.lines[+el.dataset.i];
     const nq = r2(l.qty + (+el.dataset.d) * l.step);
+    if (+el.dataset.d > 0 && !stockOk(l, nq)) return;
     if (nq <= 0) S.cart.lines.splice(+el.dataset.i, 1); else l.qty = nq;
     render();
   },
   remove: (el) => { S.cart.lines.splice(+el.dataset.i, 1); render(); },
   'clear-cart': () => { S.cart = { lines: [], discountUSD: 0, customerId: '' }; render(); },
   'show-cart': () => {
-    S.ui.showCart = true; render();
+    S.ui.showCart = true; S.ui.sheetAnim = true; render();
     try { if (!GAS) history.pushState({ sheet: 'cart' }, ''); } catch (e) { /* ignore */ }
   },
   'hide-cart': () => {
@@ -1986,7 +2008,8 @@ document.addEventListener('change', (e) => {
   const k = el.dataset && el.dataset.input;
   if (k === 'qty') {
     const l = S.cart.lines[+el.dataset.i];
-    const v = r2(el.value);
+    let v = r2(el.value);
+    if (v > l.qty && !stockOk(l, v)) v = Math.max(l.qty, Math.floor(stockLeft(l) / l.step) * l.step);
     if (v <= 0) S.cart.lines.splice(+el.dataset.i, 1); else l.qty = v;
     render();
   }
@@ -2300,6 +2323,7 @@ const DOC_CSS = (c) => `
 `;
 
 /* ---------- document models ---------- */
+const isVoid = (r) => r && (r.status === 'VOID' || r.status === 'VOIDED');
 function saleDoc(r) {
   const rt = num(r.rate) || rate();
   let sub = 0;
@@ -2321,7 +2345,7 @@ function saleDoc(r) {
   if (changeUSD > 0.004) pays.push(['Change', r.changeCurrency === 'USD' ? fmtUSD(changeUSD) : fmtLRD(changeUSD * rt)]);
   return { kind: 'RECEIPT', no: r.receiptNo, storeId: st.StoreID, date: r.timestamp, filename: 'Receipt-' + r.receiptNo,
     meta: [['Date', fmtDate(r.timestamp)], ['Served by', userName(r.userId)]], to: cust, lines, totals, pays,
-    stamp: r.status === 'VOID' ? 'VOID' : '', footer: st.ReceiptFooter || setting('DocFooter') || 'Thank you!',
+    saleId: r.id, stamp: isVoid(r) ? 'VOID' : '', footer: st.ReceiptFooter || setting('DocFooter') || 'Thank you!',
     header: st.ReceiptHeader || '', paperDefault: setting('ReceiptPaper') || '80mm',
     summary: 'Receipt ' + r.receiptNo + ' — total ' + fmtUSD(total) + ' / ' + fmtLRD(total * rt) };
 }
@@ -2448,6 +2472,7 @@ function docModal() {
       <button class="btn" data-act="doc-pdf" ${x.busy ? 'disabled' : ''}>${icon('download', 'sm')} ${x.busy === 'pdf' ? 'Making PDF…' : 'Download PDF'}</button>
       <button class="btn" data-act="doc-share" ${x.busy ? 'disabled' : ''}>${icon('share', 'sm')} ${x.busy === 'share' ? 'Making PDF…' : x.file && x.filePaper === x.paper ? 'Share PDF now' : canShareFiles ? 'Share PDF' : 'Share'}</button>
       <button class="btn" data-act="doc-email">${icon('mail', 'sm')} E-mail</button>
+      ${d.kind === 'RECEIPT' && d.saleId && !d.stamp ? `<button class="btn danger-soft" data-act="void-open" data-id="${esc(d.saleId)}">${icon('x', 'sm')} Correct / void sale</button>` : ''}
       ${d.to && d.to.phone ? `<a class="btn wa" href="${esc(waLink(d.to.phone, 'Hello ' + d.to.name + ', ' + d.summary + '. ' + (d.payInfo ? 'How to pay: ' + d.payInfo + '. ' : '') + 'Thank you — ' + b.biz))}" target="_blank" rel="noopener">${icon('chat', 'sm')} WhatsApp text</a>` : ''}
     </div>
     <p class="muted small" style="margin-top:.6rem">Print → choose your printer, or <b>Save as PDF</b>. Share PDF sends the file to WhatsApp, e-mail or any app on this phone.</p>`;
@@ -2532,11 +2557,19 @@ function viewReceipts() {
     const tot = d.totals.find((t) => t[0] === 'TOTAL USD');
     const synced = !S.queue.some((q) => q.rec.id === r.id);
     return `<div class="list-item" data-act="sale-doc" data-id="${esc(r.id)}" style="cursor:pointer">${icon('receipt')}
-      <span class="grow"><b>${esc(r.receiptNo)}</b>${r.status === 'VOID' ? ' <span class="badge bad">void</span>' : ''}${!onServer && !synced ? ' <span class="badge warn">not synced</span>' : ''}
+      <span class="grow"><b>${esc(r.receiptNo)}</b>${isVoid(r) ? ' <span class="badge bad">void</span>' : ''}${!onServer && !synced ? ' <span class="badge warn">not synced</span>' : ''}
         <div class="muted small">${fmtDate(r.timestamp)} · ${esc(userName(r.userId))}${d.to && d.to.name ? ' · ' + esc(d.to.name) : ''}</div></span>
       <b class="num">${esc(tot ? tot[1] : '')}</b><span class="btn sm ghost">${icon('printer', 'sm')} Open</span></div>`;
   };
-  return `<div class="page-head"><div><h2>Receipts</h2><div class="sub">Reprint, download as PDF, share or e-mail any receipt</div></div></div>
+  const today = new Date().toDateString();
+  const todays = S.journal.filter((r) => r.type === 'sale' && !isVoid(r) && new Date(r.timestamp).toDateString() === today);
+  const tUSD = todays.reduce((a, r) => { const d = saleDoc(r); const x = d.totals.find((t) => t[0] === 'TOTAL USD'); return a + (x ? num(String(x[1]).replace(/[^\d.-]/g, '')) : 0); }, 0);
+  return `<div class="page-head"><div><h2>Receipts</h2><div class="sub">Today's sales, reprint, correct a mistake</div></div></div>
+    <div class="kpis"><div class="kpi"><div class="k">Sales today (this phone)</div><div class="v">${todays.length}</div></div>
+      <div class="kpi"><div class="k">Total today</div><div class="v">${fmtUSD(tUSD)}</div><div class="muted small">${fmtLRD(tUSD * rate())}</div></div></div>
+    <div class="row" style="gap:.5rem;margin:.2rem 0 1rem;flex-wrap:wrap">
+      <button class="btn primary" data-act="sales-today">${icon('receipt', 'sm')} Today's sales (all phones)</button>
+      ${canAny('REPORTS_STORE', 'REPORTS_ALL') ? `<button class="btn" data-act="go" data-view="reports">${icon('chart', 'sm')} Today's report (profit, payments)</button>` : ''}</div>
     <div class="card"><h3>Find a receipt</h3>
       <form data-form="sales-search" class="row" style="gap:.5rem;flex-wrap:wrap;align-items:flex-end">
         <div class="field grow" style="min-width:180px;margin:0"><label>Receipt no., customer name or phone</label><input name="q" type="text" value="${esc(S.ui.salesQ || '')}" placeholder="e.g. ST-01-89E6-00012"></div>
@@ -2547,6 +2580,69 @@ function viewReceipts() {
     <div class="card" style="margin-top:1rem"><h3>Made on this device</h3>
       ${local.length ? local.map((r) => rowOf(r, false)).join('') : '<div class="empty">No sales on this device yet.</div>'}</div>`;
 }
+ACT['sales-today'] = async () => {
+  if (!navigator.onLine) { toast('Needs internet. The list below shows sales made on this phone.', 'bad'); return; }
+  S.ui.salesQ = ''; S.ui.salesFrom = new Date().toISOString().slice(0, 10);
+  S.ui.salesLoading = true; render();
+  try {
+    const r = await adminCall('salesList', { from: new Date(new Date().toDateString()).toISOString(), storeId: store().StoreID === 'HQ' ? undefined : store().StoreID });
+    S.ui.salesFound = r.sales;
+  } catch (e) { toast(e.message, 'bad'); }
+  S.ui.salesLoading = false; render();
+};
+
+/* ---------- correcting a sale (void, then ring up again) ---------- */
+const VOID_REASONS = ['Wrong item', 'Wrong quantity', 'Wrong price', 'Wrong payment method', 'Customer returned the goods', 'Other'];
+function findSale(id) { return S.journal.find((x) => x.id === id) || (S.ui.salesFound || []).find((x) => x.id === id); }
+function voidModal() {
+  const r = findSale(S.ui.voidId);
+  if (!r) return '<div class="empty">Sale not found</div>';
+  const d = saleDoc(r); const tot = d.totals.find((t) => t[0] === 'TOTAL USD');
+  if (!can('SALE_VOID')) return `<div class="modal-head"><h2>Correct a sale</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <p>Only the owner or a manager can correct a finished sale. Ask them to open <b>Receipts</b>, find <b>${esc(r.receiptNo)}</b> and tap <b>Correct / void sale</b>.</p>
+    <button class="btn block" data-act="close">OK</button>`;
+  return `<div class="modal-head"><h2>Correct sale ${esc(r.receiptNo)}</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <form data-form="void-sale">
+      <div class="void-sum"><b>${esc(tot ? tot[1] : '')}</b> · ${d.lines.map((l) => esc(fmtQty(l.qty) + ' × ' + l.desc)).join(', ')}</div>
+      <p class="muted small" style="margin:.6rem 0">The sale is cancelled (marked VOID): the goods go back into stock, it is removed from today's totals and from any customer's credit. It stays in the records with your reason.</p>
+      <div class="field"><label>What went wrong?</label><select name="why">${VOID_REASONS.map((x) => `<option>${x}</option>`).join('')}</select></div>
+      <div class="field"><label>Note (optional)</label><input name="note" type="text" placeholder="e.g. should be 2 yards, not 3"></div>
+      <label class="check"><input type="checkbox" name="again" checked> Put the items back in the till so I can fix them and charge again</label>
+      <div class="row" style="gap:.5rem;margin-top:1rem"><button class="btn ghost" type="button" data-act="close">Cancel</button>
+        <button class="btn danger grow" type="submit">${icon('x', 'sm')} Void this sale</button></div>
+    </form>`;
+}
+ACT['void-open'] = (el) => { S.ui.voidId = el.dataset.id; S.ui.doc = null; showModal(voidModal); };
+FORMS['void-sale'] = async (f) => {
+  const r = findSale(S.ui.voidId); if (!r) return;
+  const reason = f.why.value + (f.note.value.trim() ? ' — ' + f.note.value.trim() : '');
+  const again = f.again.checked;
+  const btn = f.querySelector('button[type=submit]'); btn.disabled = true; btn.textContent = 'Voiding…';
+  try {
+    if (!navigator.onLine) throw new Error('Correcting a sale needs internet. Connect and try again.');
+    if (S.queue.some((q) => q.rec.id === r.id)) await sync(true);
+    if (S.queue.some((q) => q.rec.id === r.id)) throw new Error('This sale has not reached the server yet. Tap Sync, then try again.');
+    await adminCall('voidSale', { saleId: r.id, reason });
+    const j = S.journal.find((x) => x.id === r.id); if (j) { j.status = 'VOID'; persist.journal(); }
+    (S.ui.salesFound || []).forEach((x) => { if (x.id === r.id) x.status = 'VOIDED'; });
+    toast('Sale ' + r.receiptNo + ' voided — stock put back', 'ok');
+    closeModal();
+    await sync(false);
+    if (again) {
+      const lines = [];
+      (r.items || []).forEach((i, k) => {
+        const p = productById(i.productId);
+        if (p) lines.push({ productId: p.ProductID, name: p.Name, unit: p.Unit, qty: num(i.qty), step: isYard(p) ? 0.5 : 1, unitPrice: num(p.SellingPrice), priceCurrency: p.PriceCurrency });
+        else if (r._names && r._names[k]) toast('Not found any more: ' + r._names[k], 'bad');
+      });
+      S.cart = { lines, discountUSD: 0, customerId: r.customerId || '' };
+      S.view = 'pos'; S.ui.showCart = true; S.ui.sheetAnim = true;
+      toast('Fix the items, then charge again', 'ok');
+    }
+    render();
+  } catch (e) { toast(e.message, 'bad'); btn.disabled = false; btn.textContent = 'Void this sale'; }
+};
+
 FORMS['sales-search'] = async (f) => {
   S.ui.salesQ = f.q.value.trim(); S.ui.salesFrom = f.from.value;
   S.ui.salesLoading = true; render();
