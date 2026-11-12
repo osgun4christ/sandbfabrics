@@ -3,7 +3,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.5.2';
+const APP_VERSION = '1.6.0';
 const PIN_ROUNDS_DEFAULT = 100;
 const ICON_SRC = (typeof window !== 'undefined' && window.SM_ICON) || 'icons/icon-192.png';
 const AUTO_SYNC_MS = 120000;   // push + pull every 2 minutes while the app is open
@@ -1327,24 +1327,222 @@ function transferQtyModal(t, action) {
 /* =====================================================================
  * Money (expenses & income)
  * ===================================================================== */
-function viewMoney() {
-  const tab = S.ui.moneyTab || (can('EXPENSE_RECORD') ? 'expense' : 'income');
-  const cats = (S.snap.categories || []).filter((c) => c.Type === (tab === 'expense' ? 'EXPENSE' : 'INCOME'));
-  const recent = S.journal.filter((r) => r.type === 'expense' || r.type === 'income').slice(-30).reverse();
-  return `<div class="page-head"><div><h2>Money</h2><div class="sub">Expenses and other income for ${esc(store().Name)}</div></div></div><div class="tabs">
-      ${can('EXPENSE_RECORD') ? `<button class="tab ${tab === 'expense' ? 'on' : ''}" data-act="money-tab" data-t="expense">Expense</button>` : ''}
-      ${can('INCOME_RECORD') ? `<button class="tab ${tab === 'income' ? 'on' : ''}" data-act="money-tab" data-t="income">Other income</button>` : ''}</div>
-    <div class="card"><form data-form="money" data-t="${tab}">
-      <div class="grid2"><div class="field"><label>Category</label><select name="category">${cats.map((c) => `<option>${esc(c.Name)}</option>`).join('')}</select></div>
-        <div class="field"><label>${tab === 'expense' ? 'Paid to' : 'Received from'}</label><input name="party" type="text"></div></div>
-      <div class="field"><label>Description</label><input name="description" type="text"></div>
-      <div class="grid2"><div class="field"><label>Currency</label><select name="currency"><option>LRD</option><option>USD</option></select></div>
-        <div class="field"><label>Amount</label><input name="amount" type="number" step="any" required></div></div>
-      <button class="btn primary block" type="submit">Save ${tab === 'expense' ? 'expense' : 'income'}</button></form></div>
-    <h3 style="margin-top:1.2rem">Recorded on this device</h3>
-    <div class="card table-wrap"><table><tbody>${recent.map((r) => `<tr><td>${fmtDate(r.timestamp)}</td><td><span class="badge ${r.type === 'expense' ? 'bad' : 'ok'}">${r.type}</span> ${esc(r.category)}<div class="muted small">${esc(r.description || '')}</div></td>
-      <td class="right num">${fmtCur(r.amount, r.currency)}</td></tr>`).join('') || '<tr><td class="empty">Nothing yet</td></tr>'}</tbody></table></div>`;
+/* =====================================================================
+ * Money: income & expenditure dashboard, full list, edit and delete
+ * ===================================================================== */
+const M_PERIODS = [['today', 'Today'], ['7d', '7 days'], ['month', 'This month'], ['lastmonth', 'Last month']];
+function moneyRange(k) {
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0);
+  if (k === '7d') return [new Date(d0.getTime() - 6 * 864e5), new Date(d0.getTime() + 864e5)];
+  if (k === 'month') return [new Date(d0.getFullYear(), d0.getMonth(), 1), new Date(d0.getTime() + 864e5)];
+  if (k === 'lastmonth') return [new Date(d0.getFullYear(), d0.getMonth() - 1, 1), new Date(d0.getFullYear(), d0.getMonth(), 1)];
+  return [d0, new Date(d0.getTime() + 864e5)];
 }
+const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+const moneyCats = (type) => (S.snap.categories || []).filter((c) => c.Type === (type === 'expense' ? 'EXPENSE' : 'INCOME'));
+function catNotInProfit(type, name) {
+  const all = (S.money && S.money.categories) || [];
+  const hit = all.find((c) => c.type === (type === 'expense' ? 'EXPENSE' : 'INCOME') && c.name === name)
+    || moneyCats(type).find((c) => c.Name === name);
+  return !!(hit && (hit.notInProfit === true || hit.NotInProfit === true || String(hit.NotInProfit).toUpperCase() === 'TRUE'));
+}
+/** An entry from this phone that the server hasn't got yet. */
+const unsyncedMoney = (id) => S.queue.find((q) => q.rec.id === id && (q.status === 'pending' || q.status === 'failed'));
+function localMoneyEntry(r) {
+  const rt = num(r.rate) || rate();
+  const usd = r.currency === 'USD' ? num(r.amount) : num(r.amount) / rt;
+  return { type: r.type, id: r.id, timestamp: r.timestamp, storeId: store().StoreID, category: r.category, description: r.description || '',
+    party: (r.type === 'expense' ? r.paidTo : r.receivedFrom) || '', currency: r.currency, amount: num(r.amount), rate: rt,
+    amountUSD: r2(usd), amountLRD: r2(usd * rt), userId: r.userId, status: r.status === 'DELETED' ? 'DELETED' : r.original ? 'EDITED' : 'ACTIVE',
+    deleteReason: r.deleteReason || '', notInProfit: catNotInProfit(r.type, r.category), local: true, unsynced: !!unsyncedMoney(r.id) };
+}
+function canEditLocal(r) { return can('MONEY_EDIT') || (r.userId === S.session.user.UserID && sameDay(r.timestamp, new Date())); }
+
+/** Entries + totals for the chosen period: from the server when online, from this phone otherwise. */
+function moneyData() {
+  const [from, to] = moneyRange(S.ui.mPeriod || 'today');
+  const inRange = (t) => { const d = new Date(t); return d >= from && d < to; };
+  const server = S.money && S.money.period === (S.ui.mPeriod || 'today') ? S.money : null;
+  let entries = server ? server.entries.slice() : [];
+  const have = new Set(entries.map((e) => e.id));
+  S.journal.filter((r) => (r.type === 'expense' || r.type === 'income') && inRange(r.timestamp))
+    .forEach((r) => { if (!have.has(r.id)) entries.push(Object.assign(localMoneyEntry(r), { canEdit: canEditLocal(r) })); });
+  entries.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+  const live = entries.filter((e) => e.status !== 'DELETED' && e.status !== 'VOID' && e.status !== 'VOIDED');
+  const sum = { inUSD: 0, inLRD: 0, outUSD: 0, outLRD: 0, npInUSD: 0, npOutUSD: 0 };
+  const cats = {}; const days = {};
+  for (let d = new Date(from); d < to && d <= new Date(); d = new Date(d.getTime() + 864e5)) days[d.toDateString()] = { d: new Date(d), inUSD: 0, outUSD: 0 };
+  live.forEach((e) => {
+    const isIn = e.type === 'income';
+    sum[isIn ? 'inUSD' : 'outUSD'] += e.amountUSD; sum[isIn ? 'inLRD' : 'outLRD'] += e.amountLRD;
+    if (e.notInProfit) sum[isIn ? 'npInUSD' : 'npOutUSD'] += e.amountUSD;
+    const k = e.type + '|' + e.category;
+    const c = cats[k] || (cats[k] = { type: e.type, name: e.category, usd: 0, lrd: 0, count: 0, notInProfit: e.notInProfit });
+    c.usd += e.amountUSD; c.lrd += e.amountLRD; c.count++;
+    const day = days[new Date(e.timestamp).toDateString()]; if (day) day[isIn ? 'inUSD' : 'outUSD'] += e.amountUSD;
+  });
+  return { entries, sum, cats: Object.values(cats).sort((a, b) => b.usd - a.usd), days: Object.values(days), online: !!server,
+    deleted: entries.length - live.length };
+}
+
+async function loadMoney() {
+  if (!S.session.token || !navigator.onLine) { S.ui.mLoading = false; render(); return; }
+  const period = S.ui.mPeriod || 'today';
+  const [from, to] = moneyRange(period);
+  S.ui.mLoading = true; render();
+  try {
+    const r = await adminCall('moneyList', { from: from.toISOString(), to: to.toISOString(), storeId: store().StoreID === 'HQ' ? undefined : store().StoreID });
+    S.money = Object.assign(r, { period });
+  } catch (e) { if (e.code !== 'AUTH') toast(e.message, 'bad'); }
+  S.ui.mLoading = false; render();
+}
+
+function viewMoney() {
+  const period = S.ui.mPeriod || 'today';
+  if (S.money === undefined && !S.ui.mLoading && S.session.token && navigator.onLine) setTimeout(loadMoney, 0);
+  const d = moneyData();
+  const s = d.sum;
+  const bal = s.inUSD - s.outUSD;
+  const sg = (n, f) => (n < -0.004 ? '−' + f(-n) : f(n));
+  const card = (k, usd, lrd, cls) => `<div class="kpi ${cls}"><div class="k">${k}</div><div class="v">${sg(usd, fmtUSD)}</div><div class="s">${sg(lrd, fmtLRD)}</div></div>`;
+  const maxCat = Math.max(1, ...d.cats.map((c) => c.usd));
+  const maxDay = Math.max(1, ...d.days.map((x) => Math.max(x.inUSD, x.outUSD)));
+  const q = (S.ui.mQ || '').toLowerCase();
+  const fCat = S.ui.mCat || '';
+  const fType = S.ui.mType || '';
+  const list = d.entries.filter((e) => (S.ui.mShowDel || e.status !== 'DELETED') && (!fType || e.type === fType) && (!fCat || e.category === fCat) &&
+    (!q || [e.category, e.description, e.party, String(e.amount)].join(' ').toLowerCase().indexOf(q) >= 0));
+  const allCats = Array.from(new Set(d.entries.map((e) => e.category))).sort();
+  const nipNote = s.npInUSD || s.npOutUSD ? `<div class="m-note">${icon('alert', 'sm')} Includes loans / owner money — in ${fmtUSD(s.npInUSD)}, out ${fmtUSD(s.npOutUSD)}. These count in the cash balance but <b>not in profit</b>. Profit view: <b>${fmtUSD((s.inUSD - s.npInUSD) - (s.outUSD - s.npOutUSD))}</b></div>` : '';
+  return `<div class="page-head"><div><h2>Money</h2><div class="sub">Income and expenses for ${esc(store().Name)}</div></div>
+      <div class="row" style="gap:.5rem">${can('EXPENSE_RECORD') ? `<button class="btn primary" data-act="money-new" data-t="expense">${icon('plus', 'sm')} Expense</button>` : ''}
+      ${can('INCOME_RECORD') ? `<button class="btn" data-act="money-new" data-t="income">${icon('plus', 'sm')} Income</button>` : ''}</div></div>
+    <div class="seg m-periods">${M_PERIODS.map((p) => `<button class="${period === p[0] ? 'on' : ''}" data-act="money-period" data-p="${p[0]}">${p[1]}</button>`).join('')}</div>
+    <div class="m-src muted small">${S.ui.mLoading ? 'Loading all phones…' : d.online ? `${icon('check', 'sm')} All phones of this shop` : `${icon('alert', 'sm')} Offline — showing entries made on this phone only`}
+      ${!S.ui.mLoading && S.session.token ? ` · <a href="#" data-act="money-reload">refresh</a>` : ''}</div>
+    <div class="kpis m-kpis">${card('Income', s.inUSD, s.inLRD, 'in')}${card('Expenses', s.outUSD, s.outLRD, 'out')}${card('Balance', bal, s.inLRD - s.outLRD, bal >= 0 ? 'pos' : 'neg')}</div>
+    ${nipNote}
+    <div class="m-grid">
+      <div class="card"><h3>By category</h3>${d.cats.length ? d.cats.map((c) => `<div class="m-bar ${c.type}">
+          <div class="m-bar-top"><span>${esc(c.name)}${c.notInProfit ? ' <span class="badge">not in profit</span>' : ''} <span class="muted small">· ${c.count}</span></span><b class="num">${fmtUSD(c.usd)}</b></div>
+          <div class="m-track"><i style="width:${Math.max(3, (c.usd / maxCat) * 100).toFixed(1)}%"></i></div></div>`).join('') : '<div class="empty">Nothing recorded in this period.</div>'}
+        <div class="m-legend"><span class="in">Income</span><span class="out">Expense</span></div></div>
+      <div class="card"><h3>Money in vs out</h3>${d.days.length > 1 ? `<div class="m-chart">${d.days.map((x) => `<div class="m-day" title="${x.d.toDateString()}: in ${fmtUSD(x.inUSD)}, out ${fmtUSD(x.outUSD)}">
+          <div class="m-cols"><i class="in" style="height:${((x.inUSD / maxDay) * 100).toFixed(1)}%"></i><i class="out" style="height:${((x.outUSD / maxDay) * 100).toFixed(1)}%"></i></div>
+          <span>${d.days.length > 10 ? (x.d.getDate() % 5 === 1 ? x.d.getDate() : '') : x.d.toLocaleDateString(undefined, { weekday: 'short' }).slice(0, 2)}</span></div>`).join('')}</div>`
+          : `<div class="m-today"><div><span class="in">In</span><b>${fmtUSD(s.inUSD)}</b></div><div><span class="out">Out</span><b>${fmtUSD(s.outUSD)}</b></div></div>`}
+        <div class="m-legend"><span class="in">Money in</span><span class="out">Money out</span></div></div>
+    </div>
+    <div class="card" style="margin-top:1rem"><div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem"><h3 style="margin:0">All entries <span class="muted small">(${list.length})</span></h3>
+        ${d.deleted ? `<label class="check small" style="margin:0"><input type="checkbox" data-act="money-showdel" ${S.ui.mShowDel ? 'checked' : ''}> Show deleted (${d.deleted})</label>` : ''}</div>
+      <div class="m-filters">
+        <div class="searchbox">${icon('search')}<input id="m-q" type="text" placeholder="Search description, paid to, amount" value="${esc(S.ui.mQ || '')}" data-input="m-q"></div>
+        <select data-input="m-type"><option value="">Expenses + income</option><option value="expense" ${fType === 'expense' ? 'selected' : ''}>Expenses</option><option value="income" ${fType === 'income' ? 'selected' : ''}>Income</option></select>
+        <select data-input="m-cat"><option value="">All categories</option>${allCats.map((c) => `<option ${c === fCat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+      <div class="m-list">${list.map((e) => `<div class="m-row ${e.status === 'DELETED' ? 'del' : ''}">
+          <span class="m-ic ${e.type}">${icon(e.type === 'expense' ? 'cash' : 'wallet', 'sm')}</span>
+          <span class="grow"><b>${esc(e.category)}</b>${e.notInProfit ? ' <span class="badge">not in profit</span>' : ''}${e.status === 'EDITED' ? ' <span class="badge brand">edited</span>' : ''}${e.unsynced ? ' <span class="badge warn">not synced</span>' : ''}${e.status === 'DELETED' ? ` <span class="badge bad">deleted</span>` : ''}
+            <div class="muted small">${fmtDate(e.timestamp)}${e.description ? ' · ' + esc(e.description) : ''}${e.party ? ' · ' + (e.type === 'expense' ? 'to ' : 'from ') + esc(e.party) : ''} · ${esc(userName(e.userId))}${e.status === 'DELETED' && e.deleteReason ? ' · reason: ' + esc(e.deleteReason) : ''}</div></span>
+          <span class="right num"><b class="${e.type === 'expense' ? 'neg' : 'pos'}">${e.type === 'expense' ? '−' : '+'}${fmtCur(e.amount, e.currency)}</b>
+            <div class="muted small">${e.currency === 'USD' ? fmtLRD(e.amountLRD) : fmtUSD(e.amountUSD)}</div></span>
+          ${e.canEdit && e.status !== 'DELETED' ? `<span class="m-acts"><button class="btn sm ghost" data-act="money-edit" data-id="${esc(e.id)}">Edit</button><button class="btn sm ghost danger" data-act="money-del" data-id="${esc(e.id)}" title="Delete">${icon('trash', 'sm')}</button></span>` : '<span class="m-acts"></span>'}
+        </div>`).join('') || '<div class="empty">No entries match.</div>'}</div></div>`;
+}
+
+function moneyForm(t, e) {
+  const cats = moneyCats(t).map((c) => c.Name);
+  if (e && cats.indexOf(e.category) < 0) cats.unshift(e.category);
+  const dt = e ? new Date(e.timestamp) : new Date();
+  const dstr = new Date(dt.getTime() - dt.getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
+  return `<div class="grid2"><div class="field"><label>Category</label><select name="category" required>${cats.map((c) => `<option ${e && e.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+        <div class="field"><label>${t === 'expense' ? 'Paid to' : 'Received from'}</label><input name="party" type="text" value="${esc(e ? e.party : '')}"></div></div>
+      <div class="field"><label>Description</label><input name="description" type="text" value="${esc(e ? e.description : '')}"></div>
+      <div class="grid2"><div class="field"><label>Currency</label><select name="currency"><option ${e && e.currency === 'LRD' ? 'selected' : ''}>LRD</option><option ${e && e.currency === 'USD' ? 'selected' : ''}>USD</option></select></div>
+        <div class="field"><label>Amount</label><input name="amount" type="number" step="any" min="0" required value="${e ? esc(e.amount) : ''}" class="bigin"></div></div>
+      ${e ? `<div class="field"><label>Date</label><input name="date" type="date" value="${dstr}" max="${new Date().toISOString().slice(0, 10)}"></div>
+        <p class="muted small">The exchange rate stays the one used on the day it was first recorded${e.rate ? ' (' + fmtQty(e.rate) + ')' : ''}, so older reports don't change.</p>` : ''}`;
+}
+function moneyNewModal() {
+  const t = S.ui.moneyTab;
+  return `<div class="modal-head"><h2>${t === 'expense' ? 'New expense' : 'New income'}</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <form data-form="money" data-t="${t}">${moneyForm(t)}<button class="btn primary block" type="submit">Save ${t === 'expense' ? 'expense' : 'income'}</button></form>`;
+}
+function findMoneyEntry(id) { return moneyData().entries.find((e) => e.id === id); }
+function moneyEditModal() {
+  const e = findMoneyEntry(S.ui.mEdit);
+  if (!e) return '<div class="empty">Entry not found</div>';
+  return `<div class="modal-head"><h2>Edit ${e.type === 'expense' ? 'expense' : 'income'}</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <form data-form="money-edit">${moneyForm(e.type, e)}
+      ${e.unsynced ? '<p class="muted small">Not synced yet — the change is made on this phone and sent with the entry.</p>' : ''}
+      <button class="btn primary block" type="submit">Save changes</button></form>`;
+}
+const DEL_REASONS = ['Entered twice', 'Wrong amount — will enter again', 'Wrong category — will enter again', 'Entered by mistake', 'Other'];
+function moneyDelModal() {
+  const e = findMoneyEntry(S.ui.mEdit);
+  if (!e) return '<div class="empty">Entry not found</div>';
+  return `<div class="modal-head"><h2>Delete this entry?</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <div class="void-sum"><b>${esc(e.category)}</b> · ${fmtCur(e.amount, e.currency)} · ${fmtDate(e.timestamp)}${e.description ? '<div class="muted small">' + esc(e.description) + '</div>' : ''}</div>
+    <p class="muted small" style="margin:.6rem 0">It is marked as deleted and left out of all totals. It is not erased: the owner can still see it with the reason.</p>
+    <form data-form="money-del"><div class="field"><label>Reason</label><select name="why">${DEL_REASONS.map((x) => `<option>${x}</option>`).join('')}</select></div>
+      <div class="field"><label>Note (optional)</label><input name="note" type="text"></div>
+      <div class="row" style="gap:.5rem"><button class="btn ghost" type="button" data-act="close">Cancel</button><button class="btn danger grow" type="submit">${icon('trash', 'sm')} Delete entry</button></div></form>`;
+}
+function guardSyncing() { if (S.syncing) { toast('Syncing — try again in a moment', 'bad'); return true; } return false; }
+const MONEY_ACTS = {
+  'money-period': (el) => { S.ui.mPeriod = el.dataset.p; S.money = null; render(); loadMoney(); },
+  'money-reload': (el, ev) => { if (ev) ev.preventDefault(); loadMoney(); },
+  'money-new': (el) => { S.ui.moneyTab = el.dataset.t; showModal(moneyNewModal); },
+  'money-showdel': () => { S.ui.mShowDel = !S.ui.mShowDel; render(); },
+  'money-edit': (el) => { S.ui.mEdit = el.dataset.id; showModal(moneyEditModal); },
+  'money-del': (el) => { S.ui.mEdit = el.dataset.id; showModal(moneyDelModal); }
+};
+const MONEY_FORMS = {
+  'money-edit': async (f) => {
+    const e = findMoneyEntry(S.ui.mEdit); if (!e) return;
+    const amt = num(f.amount.value);
+    if (!(amt > 0)) { toast('Enter an amount', 'bad'); return; }
+    const t0 = new Date(e.timestamp);
+    const nd = f.date.value ? new Date(f.date.value + 'T' + String(t0.getHours()).padStart(2, '0') + ':' + String(t0.getMinutes()).padStart(2, '0') + ':00') : t0;
+    const ch = { category: f.category.value, description: f.description.value.trim(), party: f.party.value.trim(), currency: f.currency.value, amount: amt, timestamp: nd.toISOString() };
+    if (e.unsynced) {
+      if (guardSyncing()) return;
+      const q = unsyncedMoney(e.id); const j = S.journal.find((x) => x.id === e.id);
+      [q && q.rec, j].forEach((r) => {
+        if (!r) return;
+        if (!r.original) r.original = { Category: r.category, Description: r.description || '', Party: (r.type === 'expense' ? r.paidTo : r.receivedFrom) || '', Currency: r.currency, Amount: r.amount, Timestamp: r.timestamp };
+        Object.assign(r, { category: ch.category, description: ch.description, currency: ch.currency, amount: ch.amount, timestamp: ch.timestamp, editedBy: S.session.user.UserID, editedAt: nowISO() });
+        if (r.type === 'expense') r.paidTo = ch.party; else r.receivedFrom = ch.party;
+        if (q) q.status = 'pending';
+      });
+      persist.queue(); persist.journal();
+      closeModal(); toast('Changed', 'ok'); render(); scheduleSync(1500);
+      return;
+    }
+    const btn = f.querySelector('button[type=submit]'); btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      await adminCall('moneyEdit', Object.assign({ type: e.type, id: e.id }, ch));
+      closeModal(); toast('Changed', 'ok'); await loadMoney();
+    } catch (x) { toast(x.message, 'bad'); btn.disabled = false; btn.textContent = 'Save changes'; }
+  },
+  'money-del': async (f) => {
+    const e = findMoneyEntry(S.ui.mEdit); if (!e) return;
+    const reason = f.why.value + (f.note.value.trim() ? ' — ' + f.note.value.trim() : '');
+    if (e.unsynced) {
+      if (guardSyncing()) return;
+      const q = unsyncedMoney(e.id); const j = S.journal.find((x) => x.id === e.id);
+      [q && q.rec, j].forEach((r) => { if (r) Object.assign(r, { status: 'DELETED', deleteReason: reason, editedBy: S.session.user.UserID, editedAt: nowISO() }); });
+      if (q) q.status = 'pending';
+      persist.queue(); persist.journal();
+      closeModal(); toast('Deleted', 'ok'); render(); scheduleSync(1500);
+      return;
+    }
+    const btn = f.querySelector('button[type=submit]'); btn.disabled = true; btn.textContent = 'Deleting…';
+    try {
+      await adminCall('moneyDelete', { type: e.type, id: e.id, reason });
+      closeModal(); toast('Deleted', 'ok'); await loadMoney();
+    } catch (x) { toast(x.message, 'bad'); btn.disabled = false; btn.textContent = 'Delete entry'; }
+  }
+};
 
 /* =====================================================================
  * Customers
@@ -1479,6 +1677,7 @@ function reportBody(r) {
   <div class="rgrid">
     ${bigCard('Sales', t.salesUSD, t.salesLRD, `${t.salesCount} sale${t.salesCount === 1 ? '' : 's'} ${when}`, 'brand')}
     ${bigCard('Expenses', t.expensesUSD, t.expensesLRD, 'rent, fuel, salaries and other costs')}
+    ${t.nonProfitOutUSD || t.nonProfitInUSD ? bigCard('Loans & owner money', num(t.nonProfitInUSD) - num(t.nonProfitOutUSD), num(t.nonProfitInLRD) - num(t.nonProfitOutLRD), 'in ' + fmtUSD(t.nonProfitInUSD) + ' · out ' + fmtUSD(t.nonProfitOutUSD) + ' — not in profit') : ''}
     ${hasProfit ? bigCard('Profit', t.netProfitUSD, t.netProfitLRD, 'sales − cost of goods − expenses + other income', t.netProfitUSD >= 0 ? 'good' : 'bad')
       : `<div class="rcard"><div class="k">Profit</div><div class="s" style="margin-top:.6rem">Only the owner and managers can see profit.</div></div>`}
     <div class="rcard"><div class="k">Money taken in</div>
@@ -1525,7 +1724,7 @@ function reportBody(r) {
         <span class="badge ${x.qty <= 0 ? 'bad' : 'warn'}">${fmtQty(x.qty)} left</span></div>`).join('') + (r.lowStock.length > 8 ? `<p class="muted small">+ ${r.lowStock.length - 8} more low items — see Stock</p>` : '')
         : `<div class="empty">${icon('check')}Everything is well stocked</div>`}
       ${Object.keys(r.expensesByCategory).length ? `<h3 style="margin-top:1rem">Where expenses went</h3>${Object.keys(r.expensesByCategory).sort((a, b) => r.expensesByCategory[b].usd - r.expensesByCategory[a].usd).map((k) =>
-        `<div class="list-item"><span class="grow">${esc(k)}</span><span class="num right"><b>${fmtUSD(r.expensesByCategory[k].usd)}</b><div class="muted small">${fmtLRD(r.expensesByCategory[k].lrd)}</div></span></div>`).join('')}` : ''}
+        `<div class="list-item"><span class="grow">${esc(k)}${r.expensesByCategory[k].notInProfit ? ' <span class="badge warn">not in profit</span>' : ''}</span><span class="num right"><b>${fmtUSD(r.expensesByCategory[k].usd)}</b><div class="muted small">${fmtLRD(r.expensesByCategory[k].lrd)}</div></span></div>`).join('')}` : ''}
     </div>
   </div>`;
 }
@@ -1553,15 +1752,71 @@ function adminTabs() {
   if (can('DEVICE_MANAGE')) t.push(['devices', 'Devices']);
   if (canAny('PRODUCT_MANAGE', 'PRICE_MANAGE')) t.push(['products', 'Products']);
   if (feature('OnlineShop') && canAny('SHOP_MANAGE', 'STORE_MANAGE') && (store().Type === 'SHOP' || store().StoreID === 'HQ')) t.push(['shop', 'Online shop']);
+  if (can('CATEGORY_MANAGE') && feature('Money')) t.push(['categories', 'Categories']);
   if (canChangeFeatures()) t.push(['features', 'Features']);
   if (can('SETTINGS_MANAGE')) t.push(['settings', 'Owner settings']);
   return t;
 }
 
+/* ---------- Admin → Categories (expense & income) ---------- */
+function adminCategories() {
+  if (!S.cats && !S.ui.catLoading && S.session.token) setTimeout(loadCats, 0);
+  if (!S.cats) return `<div class="card empty">${S.ui.catLoading || S.session.token ? 'Loading…' : 'Needs internet — log in again while connected.'}</div>`;
+  const t = S.ui.catType || 'EXPENSE';
+  const list = S.cats.filter((c) => c.type === t).sort((a, b) => (a.active === b.active ? a.name.localeCompare(b.name) : a.active ? -1 : 1));
+  const locked = ['Contract Income', 'Delivery Fees'];
+  return `<div class="seg" style="margin-bottom:.8rem"><button class="${t === 'EXPENSE' ? 'on' : ''}" data-act="cat-type" data-t="EXPENSE">Expenses (${S.cats.filter((c) => c.type === 'EXPENSE' && c.active).length})</button>
+      <button class="${t === 'INCOME' ? 'on' : ''}" data-act="cat-type" data-t="INCOME">Income (${S.cats.filter((c) => c.type === 'INCOME' && c.active).length})</button></div>
+    <div class="card"><h3>Add a${t === 'EXPENSE' ? 'n expense' : 'n income'} category</h3>
+      <form data-form="cat-add" class="row" style="gap:.5rem;flex-wrap:wrap;align-items:flex-end">
+        <div class="field grow" style="margin:0;min-width:200px"><label>Name</label><input name="name" type="text" maxlength="40" required placeholder="${t === 'EXPENSE' ? 'e.g. Tape measures' : 'e.g. Embroidery orders'}"></div>
+        <label class="check" style="margin:0 0 .6rem"><input type="checkbox" name="nip"> Not counted in profit (loans, owner money)</label>
+        <button class="btn primary" type="submit">${icon('plus', 'sm')} Add</button></form></div>
+    <div class="card" style="margin-top:1rem"><h3>${t === 'EXPENSE' ? 'Expense' : 'Income'} categories</h3>
+      <p class="muted small" style="margin-top:-.3rem">Hidden categories are not offered when recording, but past entries keep them. Renaming also renames past entries.</p>
+      ${list.map((c) => `<div class="list-item cat-item ${c.active ? '' : 'off'}"><span class="grow"><b>${esc(c.name)}</b>
+          ${c.notInProfit ? ' <span class="badge warn">not in profit</span>' : ''}${c.active ? '' : ' <span class="badge">hidden</span>'}</span>
+        <span class="cat-acts">${locked.indexOf(c.name) < 0 ? `<button class="btn sm ghost" data-act="cat-rename" data-n="${esc(c.name)}">Rename</button>` : ''}
+        <button class="btn sm ghost" data-act="cat-nip" data-n="${esc(c.name)}">${c.notInProfit ? 'Count in profit' : 'Leave out of profit'}</button>
+        <button class="btn sm ${c.active ? 'ghost' : 'primary'}" data-act="cat-hide" data-n="${esc(c.name)}">${c.active ? 'Hide' : 'Show'}</button></span></div>`).join('')}</div>`;
+}
+async function loadCats() {
+  S.ui.catLoading = true;
+  try { S.cats = (await adminCall('categoryList', {})).categories; } catch (e) { toast(e.message, 'bad'); }
+  S.ui.catLoading = false; render();
+}
+async function saveCat(body, msg) {
+  try {
+    const r = await adminCall('categorySave', Object.assign({ type: S.ui.catType || 'EXPENSE' }, body));
+    S.cats = r.categories;
+    // devices offer only active money categories; update this phone now (others get it at their next sync)
+    S.snap.categories = (S.snap.categories || []).filter((c) => c.Type !== 'EXPENSE' && c.Type !== 'INCOME')
+      .concat(r.categories.filter((c) => c.active).map((c) => ({ Type: c.type, Name: c.name, Active: true, NotInProfit: c.notInProfit })));
+    persist.snap(); S.money = undefined;
+    toast(msg, 'ok'); render(); return true;
+  } catch (e) { toast(e.message, 'bad'); return false; }
+}
+function catRenameModal() {
+  return `<div class="modal-head"><h2>Rename category</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <form data-form="cat-rename"><div class="field"><label>New name for “${esc(S.ui.catEdit)}”</label><input name="name" type="text" maxlength="40" required value="${esc(S.ui.catEdit)}"></div>
+      <p class="muted small">All past entries in this category get the new name too.</p>
+      <button class="btn primary block" type="submit">Rename</button></form>`;
+}
+const CAT_ACTS = {
+  'cat-type': (el) => { S.ui.catType = el.dataset.t; render(); },
+  'cat-rename': (el) => { S.ui.catEdit = el.dataset.n; showModal(catRenameModal); },
+  'cat-hide': (el) => { const c = S.cats.find((x) => x.type === (S.ui.catType || 'EXPENSE') && x.name === el.dataset.n); if (c) saveCat({ oldName: c.name, name: c.name, active: !c.active }, c.active ? 'Hidden' : 'Shown again'); },
+  'cat-nip': (el) => { const c = S.cats.find((x) => x.type === (S.ui.catType || 'EXPENSE') && x.name === el.dataset.n); if (c) saveCat({ oldName: c.name, name: c.name, notInProfit: !c.notInProfit }, c.notInProfit ? 'Now counted in profit' : 'Now left out of profit'); }
+};
+const CAT_FORMS = {
+  'cat-add': async (f) => { if (await saveCat({ name: f.name.value, notInProfit: f.nip.checked }, 'Category added')) f.reset(); },
+  'cat-rename': async (f) => { if (await saveCat({ oldName: S.ui.catEdit, name: f.name.value }, 'Renamed')) closeModal(); }
+};
+
 function viewAdmin() {
   const tabs = adminTabs();
   if (!S.ui.adminTab || !tabs.some((x) => x[0] === S.ui.adminTab)) S.ui.adminTab = tabs[0][0];
-  const body = { rate: adminRate, stores: adminStores, users: adminUsers, devices: adminDevices, products: adminProducts, settings: adminSettings, shop: adminShop, features: adminFeatures }[S.ui.adminTab];
+  const body = { rate: adminRate, stores: adminStores, users: adminUsers, devices: adminDevices, products: adminProducts, settings: adminSettings, shop: adminShop, features: adminFeatures, categories: adminCategories }[S.ui.adminTab];
   const needData = ['users', 'devices', 'products', 'settings'].indexOf(S.ui.adminTab) >= 0;
   return `<div class="page-head"><div><h2>Admin</h2><div class="sub">Manage stores, people, devices and settings</div></div></div><div class="tabs">${tabs.map((x) => `<button class="tab ${S.ui.adminTab === x[0] ? 'on' : ''}" data-act="admin-tab" data-t="${x[0]}">${x[1]}</button>`).join('')}</div>
     ${!S.session.token ? '<div class="card" style="background:#fbf0d9;margin-bottom:.8rem">You logged in offline. Admin changes need internet — log out and log in again while connected.</div>' : ''}
@@ -1985,6 +2240,9 @@ document.addEventListener('input', (e) => {
   if (k === 'stock-q') { S.ui.stockQ = el.value; const pos = el.selectionStart; render(); const n = $('#stock-q'); n.focus(); n.setSelectionRange(pos, pos); }
   if (k === 'cust-q') { S.ui.custQ = el.value; refreshModal(); const n = $('#cust-q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }
   if (k === 'custlist-q') { S.ui.custListQ = el.value; render(); }
+  if (k === 'm-q') { S.ui.mQ = el.value; render(); }
+  if (k === 'm-type') { S.ui.mType = el.value; render(); }
+  if (k === 'm-cat') { S.ui.mCat = el.value; render(); }
   if (k === 'con-q') { S.ui.conQ = el.value; const pos = el.selectionStart; render(); const n = $('#con-q'); if (n) { n.focus(); n.setSelectionRange(pos, pos); } }
   if (k === 'con-recalc') {
     const e = readConForm();
@@ -2109,7 +2367,8 @@ const FORMS = {
     if (t === 'expense') data.paidTo = f.party.value.trim(); else data.receivedFrom = f.party.value.trim();
     enqueue(t, data);
     toast((t === 'expense' ? 'Expense' : 'Income') + ' saved', 'ok');
-    f.reset(); render();
+    if (modalFn === moneyNewModal) closeModal();
+    render();
   },
   collect: (f) => {
     const amt = num(f.amount.value);
@@ -2489,7 +2748,8 @@ function emailModal() {
       <div class="row" style="gap:.5rem"><button class="btn ghost" type="button" data-act="doc-back">Back</button><button class="btn primary grow" type="submit">${icon('mail', 'sm')} Send</button></div></form>`;
 }
 
-Object.assign(ACT, INSTALL_ACTS);
+Object.assign(ACT, INSTALL_ACTS, MONEY_ACTS, CAT_ACTS);
+Object.assign(FORMS, MONEY_FORMS, CAT_FORMS);
 Object.assign(ACT, {
   'doc-paper': (el) => { S.ui.doc.paper = el.dataset.p; refreshModal(); },
   'doc-print': () => printDoc(S.ui.doc.d, S.ui.doc.paper),
