@@ -3,7 +3,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.6.1';
 const PIN_ROUNDS_DEFAULT = 100;
 const ICON_SRC = (typeof window !== 'undefined' && window.SM_ICON) || 'icons/icon-192.png';
 const AUTO_SYNC_MS = 120000;   // push + pull every 2 minutes while the app is open
@@ -248,6 +248,20 @@ function scheduleSync(ms) {
   syncTimer = setTimeout(() => sync(false), ms);
 }
 
+/** True while the user is typing in a form field on the page (not in a pop-up). */
+function busyTyping() {
+  const a = document.activeElement;
+  return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest('form') && !a.closest('#modal-root') && a.type !== 'checkbox' && a.type !== 'radio');
+}
+/** Redraw caused by the app itself (sync, timers): waits until the user leaves the field. */
+function renderBg() {
+  if (busyTyping() || (S.ui && S.ui.conEdit && S.view === 'contracts')) { S.ui.pendingRender = true; renderStatus(); return; }
+  render();
+}
+document.addEventListener('focusout', () => setTimeout(() => {
+  if (S.ui && S.ui.pendingRender && !busyTyping() && !(S.ui.conEdit && S.view === 'contracts')) { S.ui.pendingRender = false; render(); }
+}, 400));
+
 async function sync(manual) {
   if (!S.cfg || S.syncing) return;
   S.syncing = true; renderStatus();
@@ -282,7 +296,7 @@ async function sync(manual) {
     else if (manual) toast(e.message, 'bad');
   } finally {
     S.syncing = false;
-    render();
+    renderBg();
   }
 }
 
@@ -407,6 +421,10 @@ function renderNow() {
   const caret = active && typeof active.selectionStart === 'number' ? active.selectionStart : null;
   // remember where each scrolling area was, so updating the screen doesn't make it jump
   const scrolls = ['.main', '#cart-panel', '.cart-lines'].map((q) => { const e = $(q); return e ? [q, e.scrollTop] : null; }).filter(Boolean);
+  const winY = window.scrollY;
+  // keep what was typed in the quotation form (only when the lines on screen match the saved lines)
+  if ($('#con-form') && S.ui.conEdit && $$('#con-form [name^="desc_"]').length === S.ui.conEdit.items.length) readConForm();
+  S.ui.pendingRender = false;
   if (!S.cfg || !S.snap) app.innerHTML = viewDeviceSetup();
   else if (!S.session) app.innerHTML = viewLogin();
   else app.innerHTML = viewShell();
@@ -415,6 +433,7 @@ function renderNow() {
     if (el) { el.focus(); try { if (caret !== null) el.setSelectionRange(caret, caret); } catch (e) { /* ignore */ } }
   }
   scrolls.forEach(([q, top]) => { const e = $(q); if (e) e.scrollTop = top; });
+  if (window.scrollY !== winY) window.scrollTo(0, winY);
   S.ui.sheetAnim = false;
 }
 
@@ -1969,7 +1988,8 @@ function productForm(p) {
     <form data-form="product" data-id="${esc(p.ProductID || '')}">
       <div class="field"><label>Name</label><input name="name" type="text" required value="${esc(p.Name || '')}"></div>
       <div class="grid2"><div class="field"><label>Category</label><select name="category">${cats.map((c) => `<option ${c.Name === p.Category ? 'selected' : ''}>${esc(c.Name)}</option>`).join('')}</select></div>
-        <div class="field"><label>Unit (piece, yard, set…)</label><input name="unit" type="text" value="${esc(p.Unit || 'piece')}"></div></div>
+        <div class="field"><label>Sold by (unit)</label><input name="unit" type="text" list="p-units" value="${esc(p.Unit || 'piece')}"><datalist id="p-units">${['piece', 'yard', 'set', 'pair', 'dozen', 'roll', 'bundle'].map((u) => `<option value="${u}">`).join('')}</datalist>
+          <div class="muted small">What one sale counts: "yard" for fabric by the yard, "piece" for a hat. The price is for 1 of these.</div></div></div>
       <div class="grid3"><div class="field"><label>Currency</label><select name="priceCurrency"><option ${p.PriceCurrency === 'USD' ? 'selected' : ''}>USD</option><option ${p.PriceCurrency === 'LRD' ? 'selected' : ''}>LRD</option></select></div>
         ${can('VIEW_COST_PROFIT') ? `<div class="field"><label>Cost price</label><input name="costPrice" type="number" step="any" value="${esc(p.CostPrice === undefined ? '' : p.CostPrice)}"></div>` : '<div></div>'}
         <div class="field"><label>Selling price</label><input name="sellingPrice" type="number" step="any" required value="${esc(p.SellingPrice || '')}"></div></div>
@@ -2933,6 +2953,7 @@ function viewContracts() {
   if (S.ui.conEdit) return contractEditor();
   if (S.ui.conId && conById(S.ui.conId)) return contractDetail(conById(S.ui.conId));
   if (!S.contracts) {
+    if (!S.ui.conLoading && !S.ui.conTried && S.session.token && navigator.onLine) { S.ui.conTried = true; setTimeout(loadContracts, 0); }
     return `<div class="page-head"><h2>Quotations &amp; invoices</h2></div><div class="card empty">${S.ui.conLoading ? 'Loading…' : (S.session.token ? '<button class="btn primary" data-act="con-load">Load quotations &amp; invoices</button>' : 'Needs internet: log out and log in again while connected.')}</div>`;
   }
   const tab = CON_TABS.find((t) => t[0] === (S.ui.conTab || 'Q'));
@@ -2942,7 +2963,7 @@ function viewContracts() {
   const owed = all.filter((c) => c.Status === 'INVOICED' || c.Status === 'PART_PAID');
   const sumBy = (arr, k) => { const u = arr.filter((c) => c.Currency === 'USD').reduce((s, c) => s + num(c[k]), 0); const l = arr.filter((c) => c.Currency === 'LRD').reduce((s, c) => s + num(c[k]), 0); return [u ? fmtUSD(u) : '', l ? fmtLRD(l) : ''].filter(Boolean).join(' + ') || fmtUSD(0); };
   return `<div class="page-head"><div><h2>Quotations &amp; invoices</h2><div class="sub">Contract work: quote → invoice with deposit → payments → receipt</div></div>
-      <div class="row" style="gap:.5rem"><button class="btn ghost" data-act="con-load">${icon('sync', 'sm')}</button><button class="btn primary" data-act="con-new">${icon('plus', 'sm')} New quotation</button></div></div>
+      <div class="row" style="gap:.5rem"><button class="btn ghost" data-act="con-load">${icon('sync', 'sm')}</button><button class="btn" data-act="con-new">${icon('plus', 'sm')} New quotation</button><button class="btn primary" data-act="con-new" data-k="invoice">${icon('plus', 'sm')} New invoice</button></div></div>
     <div class="kpis" style="margin-bottom:1rem"><div class="kpi"><div class="k">Open quotations</div><div class="v">${all.filter((c) => c.Status === 'DRAFT' || c.Status === 'SENT').length}</div></div>
       <div class="kpi"><div class="k">Customers owe</div><div class="v">${sumBy(owed, 'Balance')}</div></div>
       <div class="kpi"><div class="k">Received (all time)</div><div class="v">${sumBy(all, 'Paid')}</div></div></div>
@@ -3002,7 +3023,8 @@ function contractEditor() {
   const sub = e.items.reduce((s, l) => s + num(l.qty) * num(l.price), 0);
   const total = Math.max(0, sub - num(e.discount));
   const dep = total * num(e.depositPct) / 100;
-  return `<div class="page-head"><div><button class="btn ghost sm" data-act="con-cancel-edit">← Back</button><h2 style="margin-top:.4rem">${e.contractId ? 'Edit ' + esc(e.no) : 'New quotation'}</h2></div></div>
+  return `<div class="page-head"><div><button class="btn ghost sm" data-act="con-cancel-edit">← Back</button><h2 style="margin-top:.4rem">${e.contractId ? 'Edit ' + esc(e.no) : e.asInvoice ? 'New invoice' : 'New quotation'}</h2>
+      ${!e.contractId ? `<div class="muted small">${e.asInvoice ? 'Goes straight to an invoice (no quotation first). The due date is set from Owner settings.' : 'Send it to the customer; when they agree, turn it into an invoice with one tap.'}</div>` : ''}</div></div>
     <form data-form="contract" id="con-form">
       <div class="rcols" style="margin-top:0">
         <div class="card"><h3>Customer</h3>
@@ -3015,14 +3037,16 @@ function contractEditor() {
           <div class="field"><label>Title</label><input name="title" type="text" required value="${esc(e.title)}" placeholder="e.g. 30 name scarves for St. Peter's choir"></div>
           ${store().StoreID === 'HQ' && !e.contractId ? `<div class="field"><label>Store</label><select name="storeId">${shops.map((s) => `<option value="${esc(s.StoreID)}" ${e.storeId === s.StoreID ? 'selected' : ''}>${esc(s.Name)}</option>`).join('')}</select></div>` : ''}
           <div class="grid2"><div class="field"><label>Currency</label><select name="currency" data-input="con-recalc"><option ${e.currency === 'USD' ? 'selected' : ''}>USD</option><option ${e.currency === 'LRD' ? 'selected' : ''}>LRD</option></select></div>
-            <div class="field"><label>Valid until</label><input name="validUntil" type="date" value="${esc(e.validUntil)}"></div></div></div>
+            ${e.asInvoice ? '<input type="hidden" name="validUntil" value="">' : `<div class="field"><label>Quotation valid until</label><input name="validUntil" type="date" value="${esc(e.validUntil)}"></div>`}</div></div>
       </div>
       <div class="card" style="margin-top:1rem"><h3>Work and prices</h3>
+        <p class="muted small" style="margin:-.2rem 0 .7rem"><b>Qty</b> = how many. <b>Unit</b> = what you are counting in (pieces, yards, sets…). Example: Qty <b>6</b> · Unit <b>yards</b> · Unit price <b>$4</b> → <b>$24</b>.</p>
+        <datalist id="units">${['pcs', 'yards', 'metres', 'sets', 'pairs', 'dozen', 'bundles', 'rolls', 'hours', 'days', 'job'].map((u) => `<option value="${u}">`).join('')}</datalist>
         <div class="conlines">${e.items.map((l, i) => `<div class="conline">
           <div class="field" style="margin:0"><label class="${i ? 'sr' : ''}">Description</label><input name="desc_${i}" type="text" value="${esc(l.desc)}" placeholder="e.g. Knitted name scarf, school colours"></div>
-          <div class="field" style="margin:0"><label class="${i ? 'sr' : ''}">Qty</label><input name="qty_${i}" type="number" step="any" min="0" value="${esc(l.qty)}" data-input="con-recalc"></div>
-          <div class="field" style="margin:0"><label class="${i ? 'sr' : ''}">Unit</label><input name="unit_${i}" type="text" value="${esc(l.unit)}" placeholder="pcs"></div>
-          <div class="field" style="margin:0"><label class="${i ? 'sr' : ''}">Unit price</label><input name="price_${i}" type="number" step="any" min="0" value="${esc(l.price)}" data-input="con-recalc"></div>
+          <div class="field" style="margin:0"><label class="${i ? 'sr' : ''}">Qty (how many)</label><input name="qty_${i}" type="number" step="any" min="0" value="${esc(l.qty)}" data-input="con-recalc"></div>
+          <div class="field" style="margin:0"><label class="${i ? 'sr' : ''}">Unit (counted in)</label><input name="unit_${i}" type="text" list="units" value="${esc(l.unit)}" placeholder="pcs"></div>
+          <div class="field" style="margin:0"><label class="${i ? 'sr' : ''}">Price for 1 unit</label><input name="price_${i}" type="number" step="any" min="0" value="${esc(l.price)}" data-input="con-recalc"></div>
           <b class="num conl-t">${fmtCur(num(l.qty) * num(l.price), e.currency)}</b>
           <button type="button" class="btn ghost icon sm" data-act="con-line-del" data-i="${i}" aria-label="Remove line">${icon('trash', 'sm')}</button></div>`).join('')}</div>
         <button type="button" class="btn sm" data-act="con-line-add" style="margin-top:.6rem">${icon('plus', 'sm')} Add line</button>
@@ -3032,7 +3056,10 @@ function contractEditor() {
       <div class="card" style="margin-top:1rem"><h3>Notes and terms</h3>
         <div class="field"><label>Notes for the customer (sizes, colours, delivery date…)</label><textarea name="notes" rows="3">${esc(e.notes)}</textarea></div>
         <div class="field"><label>Terms</label><textarea name="terms" rows="3">${esc(e.terms)}</textarea></div></div>
-      <div class="row" style="gap:.5rem;margin:1rem 0 2rem"><button type="button" class="btn ghost" data-act="con-cancel-edit">Cancel</button><button class="btn primary grow" type="submit">${icon('check', 'sm')} Save quotation</button></div>
+      <div class="row" style="gap:.5rem;margin:1rem 0 2rem;flex-wrap:wrap"><button type="button" class="btn ghost" data-act="con-cancel-edit">Cancel</button>
+        ${e.contractId ? `<button class="btn primary grow" type="submit">${icon('check', 'sm')} Save changes</button>`
+          : e.asInvoice ? `<button type="button" class="btn" data-act="con-save-as" data-k="quote">Save as quotation instead</button><button type="button" class="btn primary grow" data-act="con-save-as" data-k="invoice">${icon('check', 'sm')} Save invoice</button>`
+          : `<button type="button" class="btn" data-act="con-save-as" data-k="invoice">Save as invoice</button><button type="button" class="btn primary grow" data-act="con-save-as" data-k="quote">${icon('check', 'sm')} Save quotation</button>`}</div>
     </form>`;
 }
 function readConForm() {
@@ -3040,7 +3067,7 @@ function readConForm() {
   if (!f) return e;
   ['customerName', 'customerPhone', 'customerEmail', 'customerAddress', 'title', 'currency', 'validUntil', 'discount', 'depositPct', 'notes', 'terms'].forEach((k) => { if (f[k]) e[k] = f[k].value; });
   if (f.storeId) e.storeId = f.storeId.value;
-  e.items = e.items.map((l, i) => ({ desc: f['desc_' + i].value, qty: f['qty_' + i].value, unit: f['unit_' + i].value, price: f['price_' + i].value }));
+  e.items = e.items.map((l, i) => (f['desc_' + i] ? { desc: f['desc_' + i].value, qty: f['qty_' + i].value, unit: f['unit_' + i].value, price: f['price_' + i].value } : l));
   return e;
 }
 function payModal() {
@@ -3068,14 +3095,16 @@ Object.assign(ACT, {
   'con-tab': (el) => { S.ui.conTab = el.dataset.t; render(); },
   'con-open': (el) => { S.ui.conId = el.dataset.id; render(); window.scrollTo(0, 0); },
   'con-back': () => { S.ui.conId = null; render(); },
-  'con-new': () => {
+  'con-new': (el) => {
+    const asInvoice = !!(el && el.dataset && el.dataset.k === 'invoice');
     const days = num(setting('QuoteValidDays')) || 14;
     S.ui.conEdit = { contractId: '', no: '', storeId: store().StoreID === 'HQ' ? ((S.snap.stores || []).find((s) => s.Type === 'SHOP' && s.Status === 'ACTIVE') || {}).StoreID : store().StoreID,
       customerName: '', customerPhone: '', customerEmail: '', customerAddress: '', title: '', currency: 'USD',
       validUntil: new Date(Date.now() + days * 86400000).toISOString().slice(0, 10), discount: '', depositPct: setting('DefaultDepositPct') === undefined ? 50 : setting('DefaultDepositPct'),
-      notes: '', terms: setting('DocTerms') || '', items: [{ desc: '', qty: 1, unit: '', price: '' }] };
+      notes: '', terms: setting('DocTerms') || '', items: [{ desc: '', qty: 1, unit: '', price: '' }], asInvoice };
     render(); window.scrollTo(0, 0);
   },
+  'con-save-as': (el) => { readConForm(); S.ui.conEdit.asInvoice = el.dataset.k === 'invoice'; const f = $('#con-form'); if (f.reportValidity()) f.requestSubmit(); },
   'con-edit': () => {
     const c = conById(S.ui.conId);
     S.ui.conEdit = { contractId: c.ContractID, no: c.InvoiceNo || c.QuoteNo, storeId: c.StoreID, customerName: c.CustomerName, customerPhone: c.CustomerPhone,
@@ -3118,8 +3147,13 @@ Object.assign(FORMS, {
     if (e.contractId) body.contractId = e.contractId;
     try {
       const r = await adminCall('contractSave', body);
-      putContract(r.contract); S.ui.conEdit = null; S.ui.conId = r.contract.ContractID; S.ui.conTab = 'Q';
-      toast('Saved ' + (r.contract.InvoiceNo || r.contract.QuoteNo), 'ok'); render(); window.scrollTo(0, 0);
+      let c = r.contract;
+      if (e.asInvoice && !e.contractId && (c.Status === 'DRAFT' || c.Status === 'SENT')) {
+        c = (await adminCall('contractStatus', { contractId: c.ContractID, status: 'INVOICED' })).contract;
+      }
+      putContract(c); S.ui.conEdit = null; S.ui.conId = c.ContractID; S.ui.conTab = c.InvoiceNo ? 'I' : 'Q';
+      toast('Saved ' + (c.InvoiceNo || c.QuoteNo), 'ok'); render(); window.scrollTo(0, 0);
+      if (e.asInvoice && c.InvoiceNo) openDoc(contractDoc(c, 'INVOICE'));
     } catch (err) { toast(err.message, 'bad'); }
   },
   'con-pay': async (f) => {
