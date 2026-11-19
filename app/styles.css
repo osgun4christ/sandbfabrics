@@ -669,3 +669,14 @@ details.rcpt summary { cursor: pointer; font-weight: 650; color: var(--text-2); 
 .cat-item.off b { color: var(--muted); }
 .cat-acts { display: flex; gap: .2rem; flex-wrap: wrap; justify-content: flex-end; }
 @media (max-width: 680px) { .cat-item .grow { flex: 1 1 100%; } .cat-acts { width: 100%; } .cat-acts .btn { padding: .35rem .6rem; } }
+
+/* v1.9 new product form */
+.np-photo { display: flex; gap: .9rem; align-items: center; padding: .8rem; border-radius: 16px; background: var(--surface-2); margin-bottom: .9rem; }
+.np-pic { width: 84px; height: 84px; border-radius: 14px; overflow: hidden; flex: none; display: grid; place-items: center; background: var(--surface); border: 1.5px dashed var(--line); color: var(--muted); }
+.np-pic img { width: 100%; height: 100%; object-fit: cover; }
+.np-pbtns { min-width: 0; }
+.np-stock { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; padding: .8rem; border-radius: 16px; background: var(--brand-tint); border: 1px solid color-mix(in srgb, var(--brand) 20%, transparent); }
+.np-online { padding: .8rem; border-radius: 16px; border: 1px solid var(--line); margin: .7rem 0; display: grid; gap: .5rem; }
+.np-online .field { margin: 0; }
+.np-more { margin-top: .4rem; } .np-more summary { cursor: pointer; font-weight: 600; color: var(--brand-ink); padding: .4rem 0; }
+@media (max-width: 560px) { .np .grid3 { grid-template-columns: 1fr 1fr; } .np .grid3 > div:last-child:not(:empty) { grid-column: 1 / -1; } .np-stock { grid-template-columns: 1fr; } }

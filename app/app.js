@@ -3,7 +3,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.6.1';
+const APP_VERSION = '1.6.2';
 const PIN_ROUNDS_DEFAULT = 100;
 const ICON_SRC = (typeof window !== 'undefined' && window.SM_ICON) || 'icons/icon-192.png';
 const AUTO_SYNC_MS = 120000;   // push + pull every 2 minutes while the app is open
@@ -133,6 +133,7 @@ const ICONS = {
   chat: '<path d="M21 11.5a8.4 8.4 0 0 1-12.4 7.4L3 21l2.1-5.4A8.5 8.5 0 1 1 21 11.5z"/>',
   bag: '<path d="M5 8h14l-1 13H6zM9 8V6a3 3 0 0 1 6 0v2"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
+  camera: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13" r="3.5"/>',
   link: '<path d="M10 14a4.5 4.5 0 0 0 6.4 0l3.2-3.2a4.5 4.5 0 0 0-6.4-6.4L12 5.6M14 10a4.5 4.5 0 0 0-6.4 0l-3.2 3.2a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2"/>',
   alert: '<path d="M12 3 2 20h20zM12 10v4M12 17.5v.5"/>'
 };
@@ -1139,7 +1140,7 @@ function adminShop() {
       <label class="check" style="margin:0"><input type="checkbox" data-act="online-toggle" data-id="${esc(p.ProductID)}" ${p.ShowOnline ? 'checked' : ''}> Online</label>
       <button class="btn sm" data-act="photo-pick" data-id="${esc(p.ProductID)}">${icon('image', 'sm')} Photo</button>
       <button class="btn sm ghost" data-act="desc-edit" data-id="${esc(p.ProductID)}">Edit</button></div>`).join('')}</div>
-    <input type="file" id="photo-file" accept="image/*" capture="environment" hidden>
+    <input type="file" id="photo-file" accept="image/*" hidden>
   </div>`;
 }
 
@@ -1234,7 +1235,8 @@ function viewStock() {
   const canIntake = can('STOCK_INTAKE') && !(store().Type === 'SHOP' && !bool(setting('ShopsBuyFromSuppliers')));
   const lowCount = (S.snap.products || []).filter((p) => (stock[p.ProductID] || 0) <= num(p.ReorderLevel)).length;
   return `<div class="page-head"><h2>Stock — ${esc(store().Name)}</h2>
-      <div class="row">${canIntake ? `<button class="btn primary" data-act="intake">${icon('plus', 'sm')} ${feature('Suppliers') ? 'Receive stock' : 'Add stock'}</button>` : ''}
+      <div class="row">${can('PRODUCT_MANAGE') ? `<button class="btn primary" data-act="np-open">${icon('plus', 'sm')} New product</button>` : ''}
+      ${canIntake ? `<button class="btn" data-act="intake">${icon('plus', 'sm')} ${feature('Suppliers') ? 'Receive stock' : 'Add stock'}</button>` : ''}
       ${can('STOCK_ADJUST') ? `<button class="btn" data-act="adjust">${icon('sliders', 'sm')} Adjust / count</button>` : ''}</div></div>
     <div class="row" style="margin-bottom:.6rem"><div class="searchbox grow" style="max-width:380px">${icon('search')}<input id="stock-q" type="text" placeholder="Search stock" value="${esc(S.ui.stockQ || '')}" data-input="stock-q"></div>
       <button class="chip-f ${showLow ? 'on' : ''}" data-act="toggle-low">Low stock (${lowCount})</button></div>
@@ -1972,7 +1974,7 @@ function adminProducts() {
   const list = S.admin.products || [];
   const showCost = can('VIEW_COST_PROFIT');
   return `<div class="row between" style="margin-bottom:.6rem"><span class="muted">${list.length} product(s) in the shared catalog</span>
-      ${can('PRODUCT_MANAGE') ? `<button class="btn primary" data-act="product-edit" data-id="">${icon('plus', 'sm')} New product</button>` : ''}</div>
+      ${can('PRODUCT_MANAGE') ? `<button class="btn primary" data-act="np-open">${icon('plus', 'sm')} New product</button>` : ''}</div>
     <div class="card table-wrap"><table><thead><tr><th>Product</th><th>Category</th>${showCost ? '<th class="right">Cost</th>' : ''}<th class="right">Price</th><th class="right">Reorder</th><th></th></tr></thead><tbody>
     ${list.map((p) => `<tr><td><b>${esc(p.Name)}</b><div class="muted small">${esc(p.SKU || '')} · ${esc(p.Unit || '')}${p.Status !== 'ACTIVE' ? ' · ' + esc(p.Status) : ''}</div></td><td>${esc(p.Category)}</td>
       ${showCost ? `<td class="right num">${fmtCur(p.CostPrice, p.PriceCurrency)}</td>` : ''}<td class="right num">${fmtCur(p.SellingPrice, p.PriceCurrency)}</td><td class="right num">${fmtQty(p.ReorderLevel)}</td>
@@ -1999,6 +2001,127 @@ function productForm(p) {
       <div class="field"><label>Status</label><select name="status"><option ${p.Status === 'ACTIVE' ? 'selected' : ''}>ACTIVE</option><option ${p.Status === 'INACTIVE' ? 'selected' : ''}>INACTIVE</option></select></div>
       <button class="btn primary block" type="submit">Save product</button></form>`;
 }
+
+/* ---------- New product: everything at once (details, photo, online shop, stock on hand) ---------- */
+function openingStockMode() {
+  if (store().StoreID === 'HQ') return '';
+  if (can('STOCK_INTAKE') && !(store().Type === 'SHOP' && !bool(setting('ShopsBuyFromSuppliers')))) return 'intake';
+  if (can('STOCK_ADJUST')) return 'adjust';
+  return '';
+}
+function newProductModal() {
+  const d = S.ui.npLast || { category: '', currency: 'USD', unit: 'piece', showOnline: true };
+  const cats = (S.snap.categories || []).filter((c) => c.Type === 'PRODUCT');
+  const stockMode = openingStockMode();
+  const shopOn = feature('OnlineShop');
+  const ph = S.ui.npPhoto;
+  return `<div class="modal-head"><h2>New product</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <form data-form="new-product" class="np">
+      <div class="np-photo">
+        <div class="np-pic">${ph ? `<img src="${ph}" alt="">` : `<span>${icon('image')}</span>`}</div>
+        <div class="np-pbtns"><b>Photo</b> <span class="muted small">(optional — can be added later)</span>
+          <div class="row" style="gap:.4rem;margin-top:.4rem;flex-wrap:wrap">
+            <button type="button" class="btn sm" data-act="np-pick" data-src="gallery">${icon('image', 'sm')} From phone / gallery</button>
+            <button type="button" class="btn sm ghost" data-act="np-pick" data-src="camera">${icon('camera', 'sm')} Take photo</button>
+            ${ph ? `<button type="button" class="btn sm ghost" data-act="np-photo-clear">Remove</button>` : ''}</div></div>
+        <input type="file" id="np-gallery" accept="image/*" hidden><input type="file" id="np-camera" accept="image/*" capture="environment" hidden>
+      </div>
+      <div class="field"><label>Product name</label><input name="name" type="text" required placeholder="e.g. Super Wax Print, blue (6 yards)"></div>
+      <div class="grid2"><div class="field"><label>Category</label><select name="category">${cats.map((c) => `<option ${c.Name === d.category ? 'selected' : ''}>${esc(c.Name)}</option>`).join('')}</select></div>
+        <div class="field"><label>Sold by (unit)</label><input name="unit" type="text" list="np-units" value="${esc(d.unit)}"><datalist id="np-units">${['piece', 'yard', 'set', 'pair', 'dozen', 'roll', 'bundle'].map((u) => `<option value="${u}">`).join('')}</datalist></div></div>
+      <div class="grid3"><div class="field"><label>Currency</label><select name="priceCurrency"><option ${d.currency === 'USD' ? 'selected' : ''}>USD</option><option ${d.currency === 'LRD' ? 'selected' : ''}>LRD</option></select></div>
+        <div class="field"><label>Selling price</label><input name="sellingPrice" type="number" step="any" min="0" required inputmode="decimal"></div>
+        ${can('VIEW_COST_PROFIT') ? `<div class="field"><label>Cost price <span class="muted small">(what you paid)</span></label><input name="costPrice" type="number" step="any" min="0" inputmode="decimal"></div>` : '<div></div>'}</div>
+      ${stockMode ? `<div class="np-stock"><div class="field" style="margin:0"><label>Quantity in stock now</label><input name="qty" type="number" step="any" min="0" inputmode="decimal" class="bigin" placeholder="0"></div>
+          <div class="field" style="margin:0"><label>Warn me when it gets down to</label><input name="reorderLevel" type="number" step="any" min="0" inputmode="decimal" placeholder="e.g. 3"></div></div>
+          <p class="muted small" style="margin:.3rem 0 .6rem">Count what is on the shelf at ${esc(store().Name)}. Later changes: Stock → ${feature('Suppliers') ? 'Receive stock' : 'Add stock'} or Adjust / count.</p>`
+        : `<div class="field"><label>Warn me when stock gets down to</label><input name="reorderLevel" type="number" step="any" min="0"></div>${store().StoreID === 'HQ' ? '<p class="muted small">Stock is added from a shop phone (Stock → Add stock).</p>' : ''}`}
+      ${shopOn ? `<div class="np-online"><label class="check" style="margin:0"><input type="checkbox" name="showOnline" ${d.showOnline ? 'checked' : ''}> Show in the online shop</label>
+        <div class="field"><label>Description for customers <span class="muted small">(optional)</span></label><textarea name="description" rows="2" placeholder="Colour, size, material…"></textarea></div>
+        <div class="grid2"><div class="field"><label>Label</label><select name="onlineTag"><option value="">None</option><option value="NEW">New</option><option value="FEATURED">Featured</option></select></div>
+          <div class="field"><label>Sale price <span class="muted small">(optional)</span></label><input name="salePrice" type="number" step="any" min="0" inputmode="decimal"></div></div></div>` : ''}
+      <details class="np-more"><summary>More: code, barcode, made to order</summary>
+        <div class="grid2"><div class="field"><label>Product code (SKU)</label><input name="sku" type="text"></div><div class="field"><label>Barcode</label><input name="barcode" type="text"></div></div>
+        ${shopOn ? `<label class="check"><input type="checkbox" name="personalise"> Made to order (customer types name / colours)</label>
+          <div class="field"><label>Ready in (days)</label><input name="leadDays" type="number" min="0" step="1"></div>` : ''}</details>
+      <div class="row" style="gap:.5rem;margin-top:1rem;flex-wrap:wrap">
+        <button type="button" class="btn" data-act="np-save" data-again="1">Save &amp; add another</button>
+        <button type="button" class="btn primary grow" data-act="np-save">${icon('check', 'sm')} Save product</button></div>
+    </form>`;
+}
+const NP_ACTS = {
+  'np-open': () => { S.ui.npPhoto = null; showModal(newProductModal, true); setTimeout(() => { const n = $('.modal [name=name]'); if (n) n.focus(); }, 50); },
+  'np-pick': (el) => { const f = $(el.dataset.src === 'camera' ? '#np-camera' : '#np-gallery'); f.value = ''; f.click(); },
+  'np-photo-clear': () => { S.ui.npPhoto = null; npRefresh(); },
+  'np-save': (el) => { S.ui.npAgain = !!el.dataset.again; const f = $('form[data-form=new-product]'); if (f.reportValidity()) f.requestSubmit(); }
+};
+/** Redraw the form without losing what was typed. */
+function npRefresh() {
+  const f = $('form[data-form=new-product]'); if (!f) return;
+  const vals = {}; Array.from(f.elements).forEach((e) => { if (e.name) vals[e.name] = e.type === 'checkbox' ? e.checked : e.value; });
+  const open = f.querySelector('details') && f.querySelector('details').open;
+  refreshModal();
+  const g = $('form[data-form=new-product]');
+  Object.keys(vals).forEach((k) => { const e = g.elements[k]; if (!e) return; if (e.type === 'checkbox') e.checked = vals[k]; else e.value = vals[k]; });
+  if (open) g.querySelector('details').open = true;
+}
+function npPhotoChosen(file) {
+  if (!file) return;
+  resizeImage(file, 900).then((dataUrl) => { S.ui.npPhoto = dataUrl; npRefresh(); }).catch((e) => toast(e.message, 'bad'));
+}
+const NP_FORMS = {
+  'new-product': async (f) => {
+    if (!navigator.onLine) { toast('Adding a new product needs internet', 'bad'); return; }
+    const v = (n) => (f.elements[n] ? f.elements[n].value.trim() : '');
+    const ck = (n) => !!(f.elements[n] && f.elements[n].checked);
+    const body = { name: v('name'), category: v('category'), unit: v('unit') || 'piece', priceCurrency: v('priceCurrency'), sellingPrice: num(v('sellingPrice')),
+      reorderLevel: num(v('reorderLevel')), sku: v('sku'), barcode: v('barcode'), status: 'ACTIVE' };
+    if (!(body.sellingPrice > 0)) { toast('Enter the selling price', 'bad'); return; }
+    if (v('costPrice') !== '') body.costPrice = num(v('costPrice'));
+    if (feature('OnlineShop')) {
+      body.showOnline = ck('showOnline'); body.description = v('description'); body.onlineTag = v('onlineTag');
+      if (v('salePrice') !== '') body.salePrice = num(v('salePrice'));
+      body.personalise = ck('personalise'); if (v('leadDays') !== '') body.leadDays = num(v('leadDays'));
+    }
+    const qty = num(v('qty'));
+    const again = S.ui.npAgain;
+    const btns = f.querySelectorAll('button[data-act=np-save]'); btns.forEach((b) => { b.disabled = true; });
+    const busy = f.querySelector('button.primary'); const label = busy.innerHTML; busy.textContent = 'Saving…';
+    try {
+      const prod = (await adminCall('upsertProduct', body)).product;
+      if (S.ui.npPhoto) {
+        busy.textContent = 'Uploading photo…';
+        try { prod.ImageURL = (await adminCall('uploadImage', { productId: prod.ProductID, dataUrl: S.ui.npPhoto, name: prod.Name })).url; }
+        catch (e) { toast('Product saved, but the photo did not upload: ' + e.message + ' — add it later in Admin → Online shop', 'bad'); }
+      }
+      // usable on this phone straight away (the next sync brings the full details)
+      const local = { ProductID: prod.ProductID, SKU: prod.SKU, Barcode: prod.Barcode, Name: prod.Name, Category: prod.Category, Unit: prod.Unit,
+        PriceCurrency: prod.PriceCurrency, SellingPrice: num(prod.SalePrice) > 0 ? num(prod.SalePrice) : num(prod.SellingPrice),
+        RegularPrice: num(prod.SalePrice) > 0 ? num(prod.SellingPrice) : '', ImageURL: prod.ImageURL || '', ReorderLevel: prod.ReorderLevel, Sells: true };
+      S.snap.products = (S.snap.products || []).filter((p) => p.ProductID !== prod.ProductID).concat([local]);
+      persist.snap();
+      const mode = openingStockMode();
+      if (qty > 0 && mode === 'intake') {
+        enqueue('stockIntake', { supplierId: '', invoiceNo: 'Opening stock', currency: prod.PriceCurrency, paidAmount: 0, note: 'Opening stock — new product',
+          items: [{ productId: prod.ProductID, qty, unitCost: body.costPrice || 0 }] });
+      } else if (qty > 0 && mode === 'adjust') {
+        enqueue('stockAdjust', { reason: 'Opening stock', items: [{ productId: prod.ProductID, qty }] });
+      }
+      S.ui.npLast = { category: body.category, currency: body.priceCurrency, unit: body.unit, showOnline: body.showOnline !== false };
+      S.shopAdmin = null;
+      if (S.view === 'admin' && S.admin) { S.admin.products = (S.admin.products || []).concat([prod]); }
+      toast(prod.Name + ' added' + (qty > 0 ? ' with ' + fmtQty(qty) + ' ' + prod.Unit : ''), 'ok');
+      S.ui.npPhoto = null;
+      if (again) { refreshModal(); const n = $('.modal [name=name]'); if (n) n.focus(); }
+      else closeModal();
+      render();
+      scheduleSync(1500);
+    } catch (e) {
+      toast(e.message, 'bad');
+      btns.forEach((b) => { b.disabled = false; }); busy.innerHTML = label;
+    }
+  }
+};
 
 function storePriceForm(p) {
   const cur = productById(p.ProductID) || p;
@@ -2294,6 +2417,7 @@ document.addEventListener('change', (e) => {
   if (k === 'co-amt') { const lv = $('#co-live'); if (lv) lv.innerHTML = coLive(el.value); }
   if (k === 'color-custom') setPickerColor(el.closest('[data-picker]'), el.value);
   if (k === 'color-hex') { let v = el.value.trim(); if (v && v[0] !== '#') v = '#' + v; if (/^#[0-9a-f]{6}$/i.test(v)) setPickerColor(el.closest('[data-picker]'), v); }
+  if ((el.id === 'np-gallery' || el.id === 'np-camera') && el.files && el.files[0]) npPhotoChosen(el.files[0]);
   if (el.id === 'photo-file' && el.files && el.files[0]) {
     const target = String(S.ui.photoFor || '');
     const more = target.indexOf('more:') === 0 ? target.slice(5) : '';
@@ -2768,8 +2892,8 @@ function emailModal() {
       <div class="row" style="gap:.5rem"><button class="btn ghost" type="button" data-act="doc-back">Back</button><button class="btn primary grow" type="submit">${icon('mail', 'sm')} Send</button></div></form>`;
 }
 
-Object.assign(ACT, INSTALL_ACTS, MONEY_ACTS, CAT_ACTS);
-Object.assign(FORMS, MONEY_FORMS, CAT_FORMS);
+Object.assign(ACT, INSTALL_ACTS, MONEY_ACTS, CAT_ACTS, NP_ACTS);
+Object.assign(FORMS, MONEY_FORMS, CAT_FORMS, NP_FORMS);
 Object.assign(ACT, {
   'doc-paper': (el) => { S.ui.doc.paper = el.dataset.p; refreshModal(); },
   'doc-print': () => printDoc(S.ui.doc.d, S.ui.doc.paper),
