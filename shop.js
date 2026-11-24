@@ -100,7 +100,40 @@
   }
 
   /* ---------- data helpers ---------- */
-  const product = (id) => S.data && S.data.products.find((p) => p.id === id);
+  const product = (id) => S.data && (S.data.products.find((p) => p.id === id) || (S.data.all || []).find((p) => p.id === id));
+  /** Colours / sizes of one product come as separate items: show them as one product with choices. */
+  function groupCatalog(d) {
+    if (d.all) return d;
+    const all = d.products; const groups = {}; const reps = [];
+    all.forEach((p) => {
+      p.opt = [p.colour, p.size].filter(Boolean).join(' / ');
+      if (!p.group) { reps.push(p); return; }
+      if (!groups[p.group]) { const rep = Object.assign({}, p, { id: 'g:' + p.group, isGroup: true, variants: [] }); groups[p.group] = rep; reps.push(rep); }
+      groups[p.group].variants.push(p);
+      p.base = p.name; p.name = p.name + (p.opt ? ' — ' + p.opt : '');
+    });
+    Object.keys(groups).forEach((k) => {
+      const rep = groups[k]; const v = rep.variants;
+      const same = v.filter((x) => x.currency === v[0].currency);
+      rep.name = v[0].base; rep.price = Math.min.apply(null, same.map((x) => x.price)); rep.from = new Set(same.map((x) => x.price)).size > 1;
+      rep.was = Math.max.apply(null, v.map((x) => x.was || 0)); if (rep.was <= rep.price) rep.was = 0;
+      rep.availability = v.some((x) => x.availability === 'IN') ? 'IN' : v.some((x) => x.availability === 'LOW') ? 'LOW' : 'OUT';
+      const pics = v.map((x) => x.image).filter(Boolean);
+      rep.image = pics[0] || ''; rep.images = pics.slice(1, 6);
+      rep.best = Math.min.apply(null, v.map((x) => x.best || 99)); if (rep.best === 99) rep.best = 0;
+      rep.tag = v.some((x) => x.tag === 'FEATURED') ? 'FEATURED' : v.some((x) => x.tag === 'NEW') ? 'NEW' : '';
+      rep.updated = Math.max.apply(null, v.map((x) => x.updated || 0));
+      rep.description = (v.find((x) => x.description) || {}).description || '';
+    });
+    d.all = all; d.products = reps;
+    return d;
+  }
+  /** On a product page: the colour/size being looked at (or the product itself). */
+  function current() {
+    const p = product(S.view.id);
+    if (!p || !p.isGroup) return p;
+    return p.variants.find((x) => x.id === S.pp.vid) || p.variants.find((x) => x.availability !== 'OUT') || p.variants[0];
+  }
   const rate = () => num(S.data && S.data.rate) || 1;
   const toUSD = (n, c) => (c === 'LRD' ? num(n) / rate() : num(n));
   const unitWord = (p) => (/yard/i.test(p.unit) ? 'per yard' : (p.unit && p.unit !== 'piece' ? 'per ' + p.unit : ''));
@@ -124,7 +157,7 @@
   }
   function priceHTML(p) {
     const sale = p.was > p.price;
-    return `<div class="pr"><b class="${sale ? 'sale' : ''}">${money(p.price, p.currency)}</b>${sale ? `<s>${money(p.was, p.currency)}</s>` : ''}${unitWord(p) ? `<small>${unitWord(p)}</small>` : ''}</div>`;
+    return `<div class="pr">${p.from ? '<small style="margin:0 2px 0 0">from</small>' : ''}<b class="${sale ? 'sale' : ''}">${money(p.price, p.currency)}</b>${sale ? `<s>${money(p.was, p.currency)}</s>` : ''}${unitWord(p) ? `<small>${unitWord(p)}</small>` : ''}</div>`;
   }
   function tagsHTML(p) {
     const t = [];
@@ -136,12 +169,20 @@
     return t.length ? `<div class="tags">${t.join('')}</div>` : '';
   }
   function card(p) {
-    const inCart = S.cart.some((c) => c.id === p.id);
+    const inCart = S.cart.some((c) => c.id === p.id || (p.isGroup && p.variants.some((v) => v.id === c.id)));
     const quick = p.availability !== 'OUT';
     return `<a class="pcard${p.availability === 'OUT' ? ' soldout' : ''}" href="#" data-pid="${esc(p.id)}">
       <div class="media">${photo(p, 400)}${tagsHTML(p)}
-        ${quick ? `<button type="button" class="qadd${inCart ? ' in' : ''}" data-add="${esc(p.id)}" aria-label="${p.personalise ? 'Choose name for' : 'Add to cart:'} ${esc(p.name)}">${inCart ? icon('check') : icon('plus')}</button>` : ''}</div>
-      <span class="cat-l">${esc(p.category)}</span><span class="nm">${esc(p.name)}</span>${priceHTML(p)}</a>`;
+        ${quick ? `<button type="button" class="qadd${inCart ? ' in' : ''}" ${p.isGroup ? `data-pid="${esc(p.id)}"` : `data-add="${esc(p.id)}"`} aria-label="${p.personalise ? 'Choose name for' : 'Add to cart:'} ${esc(p.name)}">${inCart ? icon('check') : icon('plus')}</button>` : ''}</div>
+      <span class="cat-l">${esc(p.category)}${p.isGroup ? ` · ${p.variants.length} ${p.variants.some((x) => x.colour) ? 'colours' : 'sizes'}` : ''}</span><span class="nm">${esc(p.name)}</span>${p.isGroup ? swatchRow(p) : ''}${priceHTML(p)}</a>`;
+  }
+  const SW = { red: '#dc2626', blue: '#2563eb', navy: '#1e3a8a', green: '#16a34a', yellow: '#facc15', gold: '#d4a017', orange: '#f97316', pink: '#ec4899', purple: '#7c3aed',
+    black: '#111827', white: '#f9fafb', cream: '#f5f0dc', brown: '#7c4a1e', grey: '#9ca3af', gray: '#9ca3af', wine: '#7f1d1d', maroon: '#7f1d1d', teal: '#0d9488', beige: '#e7d8b5', peach: '#fdba74', lilac: '#c4b5fd' };
+  function swColour(c) { const k = String(c || '').toLowerCase().split(/[\s/,&-]+/).find((w) => SW[w]); return k ? SW[k] : ''; }
+  function swatchRow(p) {
+    const cs = Array.from(new Set(p.variants.map((x) => x.colour).filter(Boolean)));
+    if (!cs.length) return '';
+    return `<span class="swrow">${cs.slice(0, 6).map((c) => `<i title="${esc(c)}" style="background:${swColour(c) || 'conic-gradient(#f43f5e,#f59e0b,#10b981,#3b82f6,#a855f7,#f43f5e)'}"></i>`).join('')}${cs.length > 6 ? `<small>+${cs.length - 6}</small>` : ''}</span>`;
   }
   function sortList(list, how) {
     const v = (p) => toUSD(p.price, p.currency);
@@ -320,21 +361,23 @@
       </main>`;
   }
   function productView() {
-    const p = product(S.view.id);
+    const rep = product(S.view.id);
+    const p = current();
+    if (p && rep && rep.isGroup) S.pp.vid = p.id;
     if (!p) return `<main class="wrap"><div class="empty"><h3>This item is no longer available</h3><p><a href="#" data-home>Back to the shop</a></p></div></main>`;
     const d = S.data; const pp = S.pp;
-    const pics = [p.image].concat(p.images || []).filter(Boolean);
+    const pics = rep.isGroup ? [p.image || rep.image].concat(p.images || []).filter(Boolean) : [p.image].concat(p.images || []).filter(Boolean);
     const total = p.price * pp.qty;
     const out = p.availability === 'OUT';
     const o = d.options; const minFee = o.delivery.length ? o.delivery.slice().sort((a, b) => toUSD(a.fee, a.currency) - toUSD(b.fee, b.currency))[0] : null;
-    const related = d.products.filter((x) => x.id !== p.id && x.category === p.category && x.availability !== 'OUT')
-      .concat(d.products.filter((x) => x.id !== p.id && x.category !== p.category && x.availability !== 'OUT')).slice(0, 4);
+    const related = d.products.filter((x) => x.id !== rep.id && x.category === p.category && x.availability !== 'OUT')
+      .concat(d.products.filter((x) => x.id !== rep.id && x.category !== p.category && x.availability !== 'OUT')).slice(0, 4);
     const avail = p.personalise ? `<span class="avail made">${icon('clock')} Made for you${p.leadDays ? ` — ready in about ${p.leadDays} day${p.leadDays === 1 ? '' : 's'}` : ''}</span>`
       : out ? '<span class="avail out"><i></i>Sold out at the moment</span>' : p.availability === 'LOW' ? '<span class="avail low"><i></i>Only a few left</span>' : '<span class="avail in"><i></i>In stock</span>';
     const kick = [p.category, p.personalise ? 'Personalised' : isYard(p) ? 'Sold by the yard' : ''].filter(Boolean).join(' · ');
     const askText = `Hello ${d.business || d.store.name}, I'm interested in: ${p.name} (${money(p.price, p.currency)})\n${link(S.ref, { p: p.id })}`;
     const addLabel = pp.added ? 'Added — view cart' : 'Add to cart';
-    return `<main class="wrap"><nav class="crumbs" aria-label="Breadcrumb" style="padding-top:20px"><a href="#" data-home>Home</a><span>/</span><a href="#" data-cat="${esc(p.category)}">${esc(p.category)}</a><span>/</span><span>${esc(p.name)}</span></nav>
+    return `<main class="wrap"><nav class="crumbs" aria-label="Breadcrumb" style="padding-top:20px"><a href="#" data-home>Home</a><span>/</span><a href="#" data-cat="${esc(p.category)}">${esc(p.category)}</a><span>/</span><span>${esc(rep.name)}</span></nav>
       <div class="pp">
         <div class="gal">
           ${pics.length > 1 ? `<div class="thumbs">${pics.map((u, i) => `<button type="button" class="${i === pp.img ? 'on' : ''}" data-img="${i}" aria-label="Photo ${i + 1}"><img src="${esc(img(u, 170))}" alt=""></button>`).join('')}</div>` : ''}
@@ -344,9 +387,10 @@
             ${pics.length > 1 ? `<div class="pdots">${pics.map((u, i) => `<span class="${i === pp.img ? 'on' : ''}"></span>`).join('')}</div>` : ''}
           </div></div>
         <div class="info">
-          <div style="display:flex;flex-direction:column;gap:10px"><span class="kicker">${esc(kick)}</span><h1>${esc(p.name)}</h1>
+          <div style="display:flex;flex-direction:column;gap:10px"><span class="kicker">${esc(kick)}</span><h1>${esc(rep.name)}</h1>
             <div class="bigprice"><b>${money(p.price, p.currency)}</b>${p.was > p.price ? `<s>${money(p.was, p.currency)}</s>` : ''}${unitWord(p) ? `<small>${unitWord(p)}</small>` : ''}</div>${avail}</div>
-          ${p.description ? `<p class="desc">${esc(p.description)}</p>` : ''}
+          ${rep.isGroup ? optionsHTML(rep, p) : ''}
+          ${p.description || rep.description ? `<p class="desc">${esc(p.description || rep.description)}</p>` : ''}
           ${p.personalise ? `<div class="fld"><label for="cn">Name to knit in <small>(up to 30 letters)</small></label><input id="cn" data-pp="name" maxlength="30" value="${esc(pp.name)}" placeholder="e.g. SARAH" autocomplete="off"></div>
             <div class="fld"><label for="cc">Colours you want</label><input id="cc" data-pp="colours" maxlength="80" value="${esc(pp.colours)}" placeholder="e.g. purple, peach and cream"></div>` : ''}
           ${out ? '' : `<div class="qtyrow"><span style="font-weight:600">${isYard(p) ? 'How many yards?' : 'Quantity'}</span>
@@ -367,6 +411,16 @@
       </main>
       ${out ? '' : `<div class="stickybuy"><div class="tt"><span id="sbq">${qtyFmt(pp.qty)}${isYard(p) ? ' yards' : ' × ' + esc(p.unit || 'item')}</span><b id="sbt">${money(total, p.currency)}</b></div>
         <button type="button" class="btn ${pp.added ? 'dark' : 'pri'}" data-addp>${addLabel}</button></div>`}`;
+  }
+  function optionsHTML(rep, cur) {
+    const vs = rep.variants;
+    const colours = Array.from(new Set(vs.map((x) => x.colour).filter(Boolean)));
+    const sizes = Array.from(new Set(vs.map((x) => x.size).filter(Boolean)));
+    const allOut = (key, val) => vs.filter((x) => x[key] === val).every((x) => x.availability === 'OUT');
+    const block = (title, key, vals) => vals.length ? `<div class="opts"><div class="opts-h">${title}: <b>${esc(cur[key] || '')}</b></div><div class="chips">${vals.map((v) => {
+      const sw = key === 'colour' ? swColour(v) : '';
+      return `<button type="button" class="chip${cur[key] === v ? ' on' : ''}${allOut(key, v) ? ' gone' : ''}" data-opt="${key}" data-val="${esc(v)}">${sw ? `<i style="background:${sw}"></i>` : ''}${esc(v)}</button>`; }).join('')}</div></div>` : '';
+    return block('Colour', 'colour', colours) + block('Size', 'size', sizes);
   }
   function checkoutView() {
     const d = S.data; const c = S.customer;
@@ -528,7 +582,7 @@
     document.body.appendChild(t); setTimeout(() => t.remove(), 2600);
   }
   function updateProductTotals() {
-    const p = product(S.view.id); if (!p) return;
+    const p = current(); if (!p) return;
     const tt = money(p.price * S.pp.qty, p.currency);
     const a = $('#pptotal'); if (a) a.textContent = tt;
     const b = $('#sbt'); if (b) b.textContent = tt;
@@ -552,6 +606,13 @@
       addToCart(p, p.step); render(); toast('Added to cart', 'View cart'); return;
     }
     if ('pid' in ds) { go({ name: 'product', id: ds.pid }); return; }
+    if ('opt' in ds && ds.val !== undefined && S.view.name === 'product') {
+      const rep = product(S.view.id); const cur = current(); const key = ds.opt; const other = key === 'colour' ? 'size' : 'colour';
+      const vs = rep.variants.filter((x) => x[key] === ds.val);
+      const pick = vs.find((x) => x[other] === cur[other] && x.availability !== 'OUT') || vs.find((x) => x.availability !== 'OUT') || vs[0];
+      if (pick) { S.pp.vid = pick.id; S.pp.added = false; S.pp.img = 0; S.pp.qty = pick.step || 1; render(); }
+      return;
+    }
     if ('home' in ds) { go({ name: 'home' }); return; }
     if ('cat' in ds) { go({ name: 'list', cat: ds.cat }); return; }
     if ('coll' in ds) { go({ name: 'list', coll: ds.coll }); return; }
@@ -572,12 +633,12 @@
     if ('track' in ds) { S.track = { no: ds.track || '', phone: S.customer.phone || '' }; go({ name: 'track' }); return; }
     if ('img' in ds) { S.pp.img = Number(ds.img); const tr = $('#track'); tr.scrollTo({ left: S.pp.img * tr.clientWidth, behavior: 'smooth' }); $$('.thumbs button').forEach((b, k) => b.classList.toggle('on', k === S.pp.img)); return; }
     if ('q' in ds) {
-      const p = product(S.view.id); S.pp.qty = Math.max(p.step, Math.round((S.pp.qty + Number(ds.q) * p.step) * 100) / 100); S.pp.added = false;
+      const p = current(); S.pp.qty = Math.max(p.step, Math.round((S.pp.qty + Number(ds.q) * p.step) * 100) / 100); S.pp.added = false;
       $('#pq').value = qtyFmt(S.pp.qty); updateProductTotals(); return;
     }
     if ('addp' in ds) {
       if (S.pp.added) { S.layer = 'cart'; renderLayer(); return; }
-      const p = product(S.view.id);
+      const p = current();
       let custom = null;
       if (p.personalise) {
         const n = S.pp.name.trim(), c = S.pp.colours.trim();
@@ -586,7 +647,7 @@
       }
       addToCart(p, S.pp.qty, custom); S.pp.added = true; S.pp.err = ''; render(); toast('Added to cart', 'View cart'); return;
     }
-    if ('shareProduct' in ds) { const p = product(S.view.id); share(p.name, p.name + ' — ' + money(p.price, p.currency), link(S.ref, { p: p.id })); return; }
+    if ('shareProduct' in ds) { const p = product(S.view.id); const c = current(); share(p.name, p.name + ' — ' + money(c.price, c.currency), link(S.ref, { p: p.id })); return; }
     if ('shareShop' in ds) { share(S.data.business || S.data.store.name, 'Shop ' + (S.data.business || S.data.store.name) + ' online — order on WhatsApp', link(S.ref)); return; }
     if ('lq' in ds) {
       const l = S.cart.find((c) => c.key === ds.lq); const p = product(l.id);
@@ -679,7 +740,7 @@
       const cacheKey = 'shop-cat:' + S.ref.toUpperCase();
       const cached = keep.get(cacheKey, null);
       const start = (d) => {
-        S.data = d; S.links = d.links; theme(d.store.color);
+        S.data = groupCatalog(d); S.links = d.links; theme(d.store.color);
         S.cart = keep.get('shop-cart:' + S.ref, []).filter((l) => product(l.id)).map((l) => Object.assign({ key: l.id + '|' }, l));
         S.customer = Object.assign({ name: '', phone: '', method: '', optionId: '', address: '', note: '' }, keep.get('shop-customer', {}));
       };

@@ -405,6 +405,16 @@ footer .base { border-top: 1px solid #e5e0da; padding-top: 16px; padding-bottom:
 .boot { padding: 40px 16px; }
 .offline { background: #fffbeb; color: #92400e; text-align: center; font-size: 13px; padding: 8px; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+.swrow { display: flex; align-items: center; gap: 4px; margin: -2px 0 0; }
+.swrow i { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.15); }
+.swrow small { font-size: 11px; color: var(--ink-2); margin-left: 2px; }
+.opts { display: flex; flex-direction: column; gap: 8px; }
+.opts-h { font-size: 14px; color: var(--ink-2); } .opts-h b { color: var(--ink); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; padding: 9px 14px; border-radius: 999px; border: 1.5px solid rgba(0,0,0,.14); background: #fff; font: inherit; font-weight: 600; font-size: 14px; cursor: pointer; color: var(--ink); }
+.chip i { width: 18px; height: 18px; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.15); }
+.chip.on { border-color: var(--brand, #111); box-shadow: 0 0 0 2px var(--brand, #111) inset; }
+.chip.gone { opacity: .45; text-decoration: line-through; }
   </style>
 </head>
 <body>
