@@ -3,7 +3,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.6.2';
+const APP_VERSION = '1.7.0';
 const PIN_ROUNDS_DEFAULT = 100;
 const ICON_SRC = (typeof window !== 'undefined' && window.SM_ICON) || 'icons/icon-192.png';
 const AUTO_SYNC_MS = 120000;   // push + pull every 2 minutes while the app is open
@@ -159,6 +159,12 @@ const isOwner = () => S.session && S.session.role && S.session.role.RoleID === '
 const productById = (id) => (S.snap.products || []).find((p) => p.ProductID === id);
 const userName = (id) => { const u = (S.snap.users || []).find((x) => x.UserID === id); return u ? u.FullName : id; };
 const isYard = (p) => /yard|metre|meter|kg|litre|liter/i.test(p.Unit || '');
+/** Colour / size label, e.g. "Blue / L". */
+const optLabel = (p) => [p.Colour, p.Size].map((x) => String(x || '').trim()).filter(Boolean).join(' / ');
+/** Full name with colour/size: "Ankara swirl — Blue". */
+const pname = (p) => (p ? (optLabel(p) ? p.Name + ' — ' + optLabel(p) : p.Name) : '');
+const hasPiece = (p) => num(p.PieceYards) > 0 && num(p.PiecePrice) > 0;
+const groupOf = (gid) => (S.snap.products || []).filter((x) => x.GroupID === gid);
 
 async function sha256hex(s) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
@@ -520,6 +526,12 @@ function updateBanner() {
 }
 // the phone's Back button closes the cart sheet instead of leaving the app
 window.addEventListener('popstate', () => { if (S.ui && S.ui.showCart) { S.ui.showCart = false; render(); } });
+const PICK_ACTS = {
+  pick: (el) => { S.ui.pickG = el.dataset.g || ''; S.ui.pickId = el.dataset.id || ''; showModal(pickModal); },
+  'pick-add': (el) => {
+    if (addToCart(el.dataset.id, el.dataset.m)) { const p = productById(el.dataset.id); toast('Added ' + (optLabel(p) || p.Name) + (el.dataset.m === 'piece' ? ' — full piece' : ''), 'ok'); refreshModal(); }
+  }
+};
 const INSTALL_ACTS = {
   'install-app': async () => {
     if (!installEvt) return;
@@ -654,10 +666,11 @@ function brandLogo(st) {
 }
 function viewShell() {
   const items = navItems();
-  if (!items.some((i) => i[0] === S.view)) S.view = items[0][0];
+  // "count" is a sub-screen of Stock (not in the menu)
+  if (!items.some((i) => i[0] === S.view) && !(S.view === 'count' && items.some((i) => i[0] === 'stock'))) S.view = items[0][0];
   const st = store();
   const u = S.session.user;
-  const views = { pos: viewPOS, stock: viewStock, transfers: viewTransfers, money: viewMoney, customers: viewCustomers,
+  const views = { pos: viewPOS, stock: viewStock, count: viewCount, transfers: viewTransfers, money: viewMoney, customers: viewCustomers,
     shift: viewShift, reports: viewReports, admin: viewAdmin, sync: viewSync, orders: viewOrders, contracts: viewContracts, receipts: viewReceipts };
   const typeLabel = st.Type === 'WAREHOUSE' ? 'Warehouse' : st.Type === 'HQ' ? 'Head office' : 'Shop';
   return `<div class="shell">
@@ -712,30 +725,84 @@ function posGrid() {
   const q = S.ui.q.trim().toLowerCase();
   const stock = stockMap();
   const allowNeg = bool(setting('AllowNegativeStock'));
-  const inCart = {}; S.cart.lines.forEach((l) => { inCart[l.productId] = l.qty; });
+  const inCart = {}; S.cart.lines.forEach((l) => { inCart[l.productId] = (inCart[l.productId] || 0) + l.qty; });
   const list = sellable().filter((p) => (S.ui.cat === 'All' || p.Category === S.ui.cat) &&
-    (!q || (p.Name + ' ' + p.SKU + ' ' + p.Barcode).toLowerCase().indexOf(q) >= 0));
+    (!q || (p.Name + ' ' + optLabel(p) + ' ' + p.SKU + ' ' + p.Barcode).toLowerCase().indexOf(q) >= 0));
   if (!list.length) return `<div class="card empty">${icon('search')}No products match “${esc(S.ui.q)}”.</div>`;
-  // products that are sold out go to the end of the list
-  const inStock = list.filter((p) => (stock[p.ProductID] || 0) > 0);
-  const soldOut = list.filter((p) => (stock[p.ProductID] || 0) <= 0);
+  // one tile per product; colours/sizes of the same product share a tile
+  const tiles = []; const seen = {};
+  list.forEach((p) => {
+    if (p.GroupID) {
+      if (seen[p.GroupID]) { seen[p.GroupID].items.push(p); return; }
+      tiles.push(seen[p.GroupID] = { group: p.GroupID, items: [p] });
+    } else tiles.push({ items: [p] });
+  });
+  tiles.forEach((t) => {
+    t.p = t.items.find((x) => x.ImageURL) || t.items[0];
+    t.qty = t.items.reduce((a, x) => a + (stock[x.ProductID] || 0), 0);
+    t.cart = t.items.reduce((a, x) => a + (inCart[x.ProductID] || 0), 0);
+    const prices = t.items.map((x) => num(x.SellingPrice));
+    t.min = Math.min(...prices); t.max = Math.max(...prices);
+    t.multi = t.items.length > 1 || !!t.group || hasPiece(t.items[0]);
+    t.sale = t.items.some((x) => num(x.RegularPrice) > num(x.SellingPrice));
+  });
+  const inStock = tiles.filter((t) => t.qty > 0);
+  const soldOut = tiles.filter((t) => t.qty <= 0);
   const ordered = inStock.concat(soldOut);
-  return `<div class="products">${ordered.map((p, k) => {
-    const qty = stock[p.ProductID] || 0;
-    const low = qty <= num(p.ReorderLevel);
-    const badge = qty <= 0 ? 'bad' : low ? 'warn' : 'ok';
+  return `<div class="products">${ordered.map((t, k) => {
+    const p = t.p;
+    const low = t.qty <= num(p.ReorderLevel) * (t.items.length || 1);
+    const badge = t.qty <= 0 ? 'bad' : low ? 'warn' : 'ok';
     const cc = catColor(p.Name);
     const img = p.ImageURL ? (/lh3\.googleusercontent\.com\/d\/[\w-]+$/.test(p.ImageURL) ? p.ImageURL + '=w300' : p.ImageURL) : '';
-    const sale = num(p.RegularPrice) > num(p.SellingPrice);
-    const out = qty <= 0;
-    return `${out && k === inStock.length && inStock.length ? '<div class="soldout-head">Sold out</div>' : ''}<button class="prod ${out ? 'out' : ''}" data-act="add" data-id="${esc(p.ProductID)}" ${out && !allowNeg ? 'disabled' : ''}>
+    const out = t.qty <= 0;
+    const act = t.multi ? `data-act="pick" ${t.group ? `data-g="${esc(t.group)}"` : `data-id="${esc(p.ProductID)}"`}` : `data-act="add" data-id="${esc(p.ProductID)}"`;
+    const opts = t.group ? t.items.length + ' ' + (t.items.some((x) => x.Size) && !t.items.some((x) => x.Colour) ? 'sizes' : 'colours') : hasPiece(p) ? 'piece or yard' : '';
+    const price = t.min === t.max ? fmtCur(t.min, p.PriceCurrency) : 'from ' + fmtCur(t.min, p.PriceCurrency);
+    return `${out && k === inStock.length && inStock.length ? '<div class="soldout-head">Sold out</div>' : ''}<button class="prod ${out ? 'out' : ''}" ${act} ${out && !allowNeg ? 'disabled' : ''}>
       <span class="thumb" style="--c1:${cc[0]};--c2:${cc[1]}">${img ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}<b>${esc(initials(p.Name))}</b>
-        ${inCart[p.ProductID] ? `<span class="incart">${fmtQty(inCart[p.ProductID])}</span>` : out && !allowNeg ? '' : `<span class="addplus">${icon('plus', 'sm')}</span>`}
-        ${sale && !out ? '<span class="salepill">Sale</span>' : ''}${out ? '<span class="outpill">Sold out</span>' : ''}</span>
-      <span class="n">${esc(p.Name)}</span>
-      <span class="foot"><span class="p">${fmtCur(p.SellingPrice, p.PriceCurrency)}${sale ? ` <s>${fmtCur(p.RegularPrice, p.PriceCurrency)}</s>` : ''}</span>
-      <span class="stk ${badge}">${out ? 'None left' : fmtQty(qty) + ' ' + esc(p.Unit || '')}</span></span></button>`;
+        ${t.cart ? `<span class="incart">${fmtQty(t.cart)}</span>` : out && !allowNeg ? '' : `<span class="addplus">${icon(t.multi ? 'arrow' : 'plus', 'sm')}</span>`}
+        ${t.sale && !out ? '<span class="salepill">Sale</span>' : ''}${out ? '<span class="outpill">Sold out</span>' : ''}${opts && !out ? `<span class="optpill">${esc(opts)}</span>` : ''}</span>
+      <span class="n">${esc(t.group ? p.Name : pname(p))}</span>
+      <span class="foot"><span class="p">${price}${hasPiece(p) ? '<small>/' + esc(p.Unit || 'yd') + '</small>' : ''}</span>
+      <span class="stk ${badge}">${out ? 'None left' : fmtQty(t.qty) + ' ' + esc(p.Unit || '')}</span></span></button>`;
   }).join('')}</div>`;
+}
+
+/* ---------- picker: colour / size, full piece or by the yard ---------- */
+function pickModal() {
+  const items = S.ui.pickG ? groupOf(S.ui.pickG).filter((x) => x.Sells !== false) : [productById(S.ui.pickId)].filter(Boolean);
+  if (!items.length) return '<div class="empty">Product not found</div>';
+  const stock = stockMap();
+  const allowNeg = bool(setting('AllowNegativeStock'));
+  const inCart = (pid, mode) => S.cart.lines.filter((l) => l.productId === pid && (l.mode || 'unit') === mode).reduce((a, l) => a + (l.pieceYards ? l.qty / l.pieceYards : l.qty), 0);
+  const p0 = items.find((x) => x.ImageURL) || items[0];
+  const img = p0.ImageURL ? (/lh3\.googleusercontent\.com\/d\/[\w-]+$/.test(p0.ImageURL) ? p0.ImageURL + '=w300' : p0.ImageURL) : '';
+  items.sort((a, b) => (stock[b.ProductID] > 0) - (stock[a.ProductID] > 0) || optLabel(a).localeCompare(optLabel(b)));
+  return `<div class="modal-head"><div class="row" style="gap:.7rem;align-items:center">${img ? `<img class="pick-img" src="${esc(img)}" alt="" referrerpolicy="no-referrer">` : ''}<h2>${esc(p0.Name)}</h2></div><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <p class="muted small" style="margin-top:-.4rem">${S.ui.pickG ? 'Tap the colour / size the customer wants.' : ''} ${hasPiece(p0) ? 'Sell a <b>full piece</b> or <b>by the ' + esc(p0.Unit || 'yard') + '</b>.' : ''}</p>
+    <div class="pick-list">${items.map((p) => {
+      const q = stock[p.ProductID] || 0;
+      const out = q <= 0 && !allowNeg;
+      const sw = colourSwatch(p.Colour);
+      const nPiece = inCart(p.ProductID, 'piece'), nUnit = inCart(p.ProductID, 'unit');
+      const unitBtn = `<button class="pick-btn" data-act="pick-add" data-id="${esc(p.ProductID)}" data-m="unit" ${out ? 'disabled' : ''}>
+          <span>${hasPiece(p) ? 'By the ' + esc(p.Unit || 'yard') : 'Add'}</span><b>${fmtCur(p.SellingPrice, p.PriceCurrency)}</b>${nUnit ? `<i>${fmtQty(nUnit)} in sale</i>` : ''}</button>`;
+      const pieceBtn = hasPiece(p) ? `<button class="pick-btn piece" data-act="pick-add" data-id="${esc(p.ProductID)}" data-m="piece" ${(q < num(p.PieceYards) && !allowNeg) ? 'disabled' : ''}>
+          <span>Full piece (${fmtQty(p.PieceYards)} ${esc(p.Unit || 'yd')})</span><b>${fmtCur(p.PiecePrice, p.PriceCurrency)}</b>${nPiece ? `<i>${fmtQty(nPiece)} in sale</i>` : ''}</button>` : '';
+      return `<div class="pick-row ${q <= 0 ? 'out' : ''}">
+        <div class="pick-name">${sw}<span><b>${esc(optLabel(p) || p.Name)}</b><div class="muted small">${q > 0 ? fmtQty(q) + ' ' + esc(p.Unit || '') + ' left' : 'Sold out'}</div></span></div>
+        <div class="pick-btns">${pieceBtn}${unitBtn}</div></div>`;
+    }).join('')}</div>
+    <button class="btn primary block" style="margin-top:.8rem" data-act="close">Done</button>`;
+}
+const COLOUR_WORDS = { red: '#dc2626', blue: '#2563eb', navy: '#1e3a8a', green: '#16a34a', yellow: '#facc15', gold: '#d4a017', orange: '#f97316', pink: '#ec4899',
+  purple: '#7c3aed', violet: '#7c3aed', black: '#111827', white: '#f9fafb', cream: '#f5f0dc', brown: '#7c4a1e', grey: '#9ca3af', gray: '#9ca3af', silver: '#cbd5e1',
+  wine: '#7f1d1d', maroon: '#7f1d1d', teal: '#0d9488', beige: '#e7d8b5', peach: '#fdba74', lilac: '#c4b5fd', sky: '#38bdf8' };
+function colourSwatch(c) {
+  if (!c) return '';
+  const k = String(c).toLowerCase().split(/[\s/,&-]+/).find((w) => COLOUR_WORDS[w]);
+  return `<span class="swatch" style="background:${k ? COLOUR_WORDS[k] : 'conic-gradient(#f43f5e,#f59e0b,#10b981,#3b82f6,#a855f7,#f43f5e)'}"></span>`;
 }
 
 function lineUSD(l) { return toUSD(l.unitPrice * l.qty, l.priceCurrency); }
@@ -756,10 +823,10 @@ function cartPanel() {
     ${S.ui.showCart ? `<button class="sheet-more" data-act="hide-cart">${icon('plus', 'sm')} Add more products</button>` : ''}
     ${S.cart.orderId ? `<div class="order-banner">${icon('bag', 'sm')} <span>Online order <b>${esc(S.cart.orderNo)}</b>${S.cart.orderFee && S.cart.orderFee.fee ? ` · collect delivery fee <b>${fmtCur(S.cart.orderFee.fee, S.cart.orderFee.currency)}</b> too (recorded automatically)` : ''}</span></div>` : ''}
     <div class="cart-lines">${S.cart.lines.length ? S.cart.lines.map((l, i) => `<div class="cart-line">
-        <div><div class="n">${esc(l.name)}</div><div class="muted small">${fmtCur(l.unitPrice, l.priceCurrency)} / ${esc(l.unit || 'unit')}</div></div>
+        <div><div class="n">${esc(l.name)}</div><div class="muted small">${l.pieceYards ? fmtCur(l.unitPrice * l.pieceYards, l.priceCurrency) + ' / piece · ' + fmtQty(l.qty) + ' yd' : fmtCur(l.unitPrice, l.priceCurrency) + ' / ' + esc(l.unit || 'unit')}</div></div>
         <div class="right"><b class="num">${fmtCur(l.unitPrice * l.qty, l.priceCurrency)}</b></div>
         <div class="qty"><button data-act="qty" data-i="${i}" data-d="-1" aria-label="less">${icon('minus', 'sm')}</button>
-          <input id="qty-${i}" type="number" inputmode="decimal" step="${l.step}" min="0" value="${l.qty}" data-input="qty" data-i="${i}">
+          <input id="qty-${i}" type="number" inputmode="decimal" step="${l.pieceYards ? 1 : l.step}" min="0" value="${l.pieceYards ? r2(l.qty / l.pieceYards) : l.qty}" data-input="qty" data-i="${i}">
           <button data-act="qty" data-i="${i}" data-d="1" aria-label="more">${icon('plus', 'sm')}</button></div>
         <div class="right"><button class="btn ghost icon sm" data-act="remove" data-i="${i}" title="Remove">${icon('trash', 'sm')}</button></div>
       </div>`).join('') : `<div class="empty">${icon('cart')}Tap a product to start a sale</div>`}</div>
@@ -780,26 +847,38 @@ function cartPanel() {
 }
 
 /** How much of this line's product is in stock (other cart lines of the same product don't exist: one line per product). */
-function stockLeft(l) { return stockMap()[l.productId] || 0; }
+function stockLeft(l) {
+  const others = S.cart.lines.filter((x) => x !== l && x.productId === l.productId).reduce((a, x) => a + x.qty, 0);
+  return (stockMap()[l.productId] || 0) - others;
+}
 function stockOk(l, want) {
   const have = stockLeft(l);
   if (want <= have) return true;
   if (bool(setting('AllowNegativeStock'))) { toast('Stock shows ' + fmtQty(Math.max(0, have)) + ' ' + (l.unit || '') + ' — the sale will be marked for the owner to check', 'bad'); return true; }
+  if (l.pieceYards) { const p = productById(l.productId) || {}; toast('Only ' + fmtQty(Math.max(0, have)) + ' ' + (p.Unit || 'yd') + ' of ' + pname(p) + ' left (' + Math.floor(Math.max(0, have) / l.pieceYards) + ' full piece' + (Math.floor(Math.max(0, have) / l.pieceYards) === 1 ? '' : 's') + ')', 'bad'); return false; }
   toast('Only ' + fmtQty(Math.max(0, have)) + ' ' + (l.unit || '') + ' of ' + l.name + ' in stock', 'bad');
   return false;
 }
-function addToCart(pid) {
+function addToCart(pid, mode) {
   const p = productById(pid);
-  if (!p) return;
-  const step = isYard(p) ? 0.5 : 1;
-  const ex = S.cart.lines.find((l) => l.productId === pid);
+  if (!p) return false;
+  const piece = mode === 'piece' && hasPiece(p);
+  const m = piece ? 'piece' : 'unit';
+  const step = piece ? num(p.PieceYards) : isYard(p) ? 0.5 : 1;
+  const add = piece ? num(p.PieceYards) : 1;
+  const ex = S.cart.lines.find((l) => l.productId === pid && (l.mode || 'unit') === m);
   const stock = stockMap()[pid] || 0;
-  const want = (ex ? ex.qty : 0) + (isYard(p) ? 1 : 1);
-  if (want > stock && !bool(setting('AllowNegativeStock'))) { toast(stock > 0 ? 'Only ' + fmtQty(stock) + ' ' + (p.Unit || '') + ' in stock' : p.Name + ' is sold out', 'bad'); return; }
+  const already = S.cart.lines.filter((l) => l.productId === pid).reduce((a, l) => a + l.qty, 0);
+  const want = already + add;
+  if (want > stock && !bool(setting('AllowNegativeStock'))) { toast(stock > 0 ? 'Only ' + fmtQty(stock) + ' ' + (p.Unit || '') + ' of ' + pname(p) + ' in stock' : pname(p) + ' is sold out', 'bad'); return false; }
   if (want > stock) toast('Stock shows ' + fmtQty(Math.max(0, stock)) + ' — the sale will be marked for the owner to check', 'bad');
-  if (ex) ex.qty = r2(ex.qty + 1);
-  else S.cart.lines.push({ productId: pid, name: p.Name, unit: p.Unit, qty: 1, step, unitPrice: num(p.SellingPrice), priceCurrency: p.PriceCurrency });
+  if (ex) ex.qty = r2(ex.qty + add);
+  else if (piece) {
+    S.cart.lines.push({ productId: pid, mode: 'piece', name: pname(p) + ' — full piece (' + fmtQty(p.PieceYards) + ' ' + (p.Unit || 'yd') + ')', unit: 'piece',
+      pieceYards: num(p.PieceYards), qty: add, step, unitPrice: num(p.PiecePrice) / num(p.PieceYards), priceCurrency: p.PriceCurrency });
+  } else S.cart.lines.push({ productId: pid, mode: 'unit', name: pname(p), unit: p.Unit, qty: 1, step, unitPrice: num(p.SellingPrice), priceCurrency: p.PriceCurrency });
   render();
+  return true;
 }
 
 /* ---------- checkout ---------- */
@@ -877,7 +956,8 @@ function finishSale() {
   const rec = enqueue('sale', {
     receiptNo,
     customerId: S.cart.customerId || undefined,
-    items: S.cart.lines.map((l) => ({ productId: l.productId, qty: l.qty, priceCurrency: l.priceCurrency, unitPrice: l.unitPrice })),
+    items: S.cart.lines.map((l) => Object.assign({ productId: l.productId, qty: l.qty, priceCurrency: l.priceCurrency, unitPrice: l.unitPrice },
+      l.pieceYards ? { pieces: r2(l.qty / l.pieceYards), pieceYards: l.pieceYards } : {})),
     discountUSD: r2(t.disc),
     payments: co.tenders.map((x) => ({ method: x.method, currency: x.currency, amount: x.amount, reference: x.reference || undefined })),
     changeCurrency: co.changeCurrency
@@ -1226,30 +1306,175 @@ function resizeImage(file, maxSide) {
 /* =====================================================================
  * Stock
  * ===================================================================== */
+/** Products grouped as on the till: colours/sizes of one product together. */
+function stockGroups(list) {
+  const stock = stockMap();
+  const out = []; const seen = {};
+  list.forEach((p) => {
+    if (p.GroupID) { if (seen[p.GroupID]) { seen[p.GroupID].items.push(p); return; } out.push(seen[p.GroupID] = { id: p.GroupID, items: [p] }); }
+    else out.push({ id: p.ProductID, items: [p] });
+  });
+  out.forEach((g) => {
+    g.p = g.items[0]; g.multi = g.items.length > 1 || !!g.p.GroupID;
+    g.qty = g.items.reduce((a, x) => a + (stock[x.ProductID] || 0), 0);
+    g.low = g.items.filter((x) => (stock[x.ProductID] || 0) > 0 && (stock[x.ProductID] || 0) <= num(x.ReorderLevel)).length;
+    g.out = g.items.filter((x) => (stock[x.ProductID] || 0) <= 0).length;
+    g.sell = g.items.reduce((a, x) => a + Math.max(0, stock[x.ProductID] || 0) * num(x.SellingPrice), 0);
+    g.state = g.qty <= 0 ? 'out' : (g.low || g.out) ? 'low' : 'ok';
+  });
+  return out;
+}
 function viewStock() {
   const stock = stockMap();
   const q = (S.ui.stockQ || '').toLowerCase();
-  const showLow = S.ui.stockLow;
-  const list = (S.snap.products || []).filter((p) => (!q || (p.Name + ' ' + p.SKU + ' ' + p.Category).toLowerCase().indexOf(q) >= 0))
-    .filter((p) => !showLow || (stock[p.ProductID] || 0) <= num(p.ReorderLevel));
+  const f = S.ui.stockF || 'all';
+  const cat = S.ui.stockCat || '';
+  const all = (S.snap.products || []).filter((p) => p.Sells !== false);
+  const groups = stockGroups(all);
+  const n = { all: groups.length, low: groups.filter((g) => g.state === 'low').length, out: groups.filter((g) => g.state === 'out').length };
+  n.ok = n.all - n.low - n.out;
+  const shown = groups.filter((g) => (!cat || g.p.Category === cat) && (f === 'all' || g.state === f) &&
+    (!q || g.items.some((p) => (p.Name + ' ' + optLabel(p) + ' ' + p.SKU + ' ' + p.Category).toLowerCase().indexOf(q) >= 0)));
   const canIntake = can('STOCK_INTAKE') && !(store().Type === 'SHOP' && !bool(setting('ShopsBuyFromSuppliers')));
-  const lowCount = (S.snap.products || []).filter((p) => (stock[p.ProductID] || 0) <= num(p.ReorderLevel)).length;
-  return `<div class="page-head"><h2>Stock — ${esc(store().Name)}</h2>
-      <div class="row">${can('PRODUCT_MANAGE') ? `<button class="btn primary" data-act="np-open">${icon('plus', 'sm')} New product</button>` : ''}
-      ${canIntake ? `<button class="btn" data-act="intake">${icon('plus', 'sm')} ${feature('Suppliers') ? 'Receive stock' : 'Add stock'}</button>` : ''}
-      ${can('STOCK_ADJUST') ? `<button class="btn" data-act="adjust">${icon('sliders', 'sm')} Adjust / count</button>` : ''}</div></div>
-    <div class="row" style="margin-bottom:.6rem"><div class="searchbox grow" style="max-width:380px">${icon('search')}<input id="stock-q" type="text" placeholder="Search stock" value="${esc(S.ui.stockQ || '')}" data-input="stock-q"></div>
-      <button class="chip-f ${showLow ? 'on' : ''}" data-act="toggle-low">Low stock (${lowCount})</button></div>
-    <div class="card table-wrap" id="stock-table"><table><thead><tr><th>Product</th><th>Category</th><th class="right">In stock</th><th class="right">Reorder at</th><th>Price</th></tr></thead><tbody>
-      ${list.map((p) => { const qn = stock[p.ProductID] || 0; const cls = qn <= 0 ? 'bad' : qn <= num(p.ReorderLevel) ? 'warn' : 'ok';
-        return `<tr><td><b>${esc(p.Name)}</b><div class="muted small">${esc(p.SKU || '')}${p.Sells === false ? ' · not sold here' : ''}</div></td><td>${esc(p.Category)}</td>
-        <td class="right"><span class="badge ${cls}">${fmtQty(qn)} ${esc(p.Unit || '')}</span></td><td class="right num">${fmtQty(p.ReorderLevel)}</td>
-        <td class="num">${fmtCur(p.SellingPrice, p.PriceCurrency)}</td></tr>`; }).join('') || '<tr><td colspan="5" class="empty">Nothing here</td></tr>'}
-    </tbody></table></div>`;
+  // selling value of what is shown, per currency (works offline)
+  const sv = { USD: 0, LRD: 0 };
+  shown.forEach((g) => g.items.forEach((p) => { sv[p.PriceCurrency === 'LRD' ? 'LRD' : 'USD'] += Math.max(0, stock[p.ProductID] || 0) * num(p.SellingPrice); }));
+  const cats = Array.from(new Set(all.map((p) => p.Category))).sort();
+  const tab = (k, label, cls) => `<button class="st-card ${cls} ${f === k ? 'on' : ''}" data-act="stock-f" data-f="${k}"><b>${n[k]}</b><span>${label}</span></button>`;
+  const qtyTxt = (x, p) => `${fmtQty(x)} ${esc(p.Unit || '')}`;
+  const pieceTxt = (x, p) => hasPiece(p) && x > 0 ? `<div class="muted small">≈ ${fmtQty(Math.floor(x / num(p.PieceYards)))} full piece${Math.floor(x / num(p.PieceYards)) === 1 ? '' : 's'}</div>` : '';
+  return `<div class="page-head"><div><h2>Stock — ${esc(store().Name)}</h2><div class="sub">What you have, what is running low, and what it is worth</div></div>
+      <div class="row" style="flex-wrap:wrap;gap:.4rem">${can('PRODUCT_MANAGE') ? `<button class="btn primary" data-act="np-open">${icon('plus', 'sm')} New product</button>` : ''}
+      ${canIntake ? `<button class="btn" data-act="intake">${icon('box', 'sm')} ${feature('Suppliers') ? 'Receive stock' : 'Add stock'}</button>` : ''}
+      ${can('STOCK_ADJUST') ? `<button class="btn" data-act="go" data-view="count">${icon('check', 'sm')} Count the shelf</button>
+        <button class="btn ghost" data-act="adjust">${icon('sliders', 'sm')} Adjust</button>` : ''}</div></div>
+    <div class="st-cards">${tab('all', 'products', '')}${tab('ok', 'in stock', 'ok')}${tab('low', 'running low', 'warn')}${tab('out', 'sold out', 'bad')}</div>
+    ${stockValueCard(sv)}
+    <div class="row" style="margin:.8rem 0 .6rem;gap:.5rem;flex-wrap:wrap"><div class="searchbox grow" style="max-width:380px">${icon('search')}<input id="stock-q" type="text" placeholder="Search name, colour, code" value="${esc(S.ui.stockQ || '')}" data-input="stock-q"></div>
+      <select data-input="stock-cat" style="max-width:200px"><option value="">All categories</option>${cats.map((c) => `<option ${c === cat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+    <div class="card st-list">${shown.map((g) => {
+      const open = S.ui.stockOpen === g.id;
+      const p = g.p;
+      const head = `<div class="st-row ${g.multi ? 'grp' : ''}" ${g.multi ? `data-act="stock-open" data-id="${esc(g.id)}"` : ''}>
+        <span class="st-dot ${g.state}"></span>
+        <span class="grow"><b>${esc(g.multi ? p.Name : pname(p))}</b>
+          <div class="muted small">${esc(p.Category)}${g.multi ? ` · ${g.items.length} ${g.items.some((x) => x.Size) && !g.items.some((x) => x.Colour) ? 'sizes' : 'colours'}` : ''}${g.out && g.multi && g.qty > 0 ? ` · <span class="bad-t">${g.out} sold out</span>` : ''}${g.low ? ` · <span class="warn-t">${g.low} low</span>` : ''}</div></span>
+        <span class="right"><b class="st-q ${g.state}">${g.qty <= 0 ? 'None' : qtyTxt(g.qty, p)}</b>${!g.multi ? pieceTxt(g.qty, p) : ''}
+          <div class="muted small">${g.multi && new Set(g.items.map((x) => x.SellingPrice)).size > 1 ? 'from ' + fmtCur(Math.min(...g.items.map((x) => num(x.SellingPrice))), p.PriceCurrency) : fmtCur(p.SellingPrice, p.PriceCurrency)}${hasPiece(p) ? ' / ' + esc(p.Unit || 'yd') : ''}</div></span>
+        ${g.multi ? `<span class="st-chev ${open ? 'open' : ''}">${icon('arrow', 'sm')}</span>` : ''}</div>`;
+      const kids = g.multi && open ? `<div class="st-kids">${g.items.slice().sort((a, b) => optLabel(a).localeCompare(optLabel(b))).map((x) => {
+        const qx = stock[x.ProductID] || 0; const stt = qx <= 0 ? 'out' : qx <= num(x.ReorderLevel) ? 'low' : 'ok';
+        return `<div class="st-row kid">${colourSwatch(x.Colour) || '<span class="st-dot ' + stt + '"></span>'}<span class="grow">${esc(optLabel(x))}<div class="muted small">${fmtCur(x.SellingPrice, x.PriceCurrency)}${x.SKU ? ' · ' + esc(x.SKU) : ''}</div></span>
+          <span class="right"><b class="st-q ${stt}">${qx <= 0 ? 'None' : qtyTxt(qx, x)}</b>${pieceTxt(qx, x)}</span></div>`; }).join('')}</div>` : '';
+      return head + kids;
+    }).join('') || '<div class="empty">Nothing here</div>'}</div>`;
+}
+function stockValueCard(sv) {
+  const sell = `<div class="sv-sell"><span class="muted small">Selling value of the list below</span>
+      <b>${fmtUSD(sv.USD)}</b><span class="muted">+</span><b>${fmtLRD(sv.LRD)}</b></div>`;
+  if (!can('VIEW_COST_PROFIT')) return `<div class="card sv">${sell}</div>`;
+  const v = S.stockValue;
+  if (!v && !S.ui.svLoading && S.session.token && navigator.onLine) setTimeout(loadStockValue, 0);
+  if (!v) return `<div class="card sv">${sell}<div class="muted small" style="margin-top:.4rem">${S.ui.svLoading ? 'Working out the value at cost…' : 'Cost value needs internet.'}</div></div>`;
+  const prof = (a, b) => b - a;
+  const blk = (title, sub, c, sl, pr, fmt, extra) => `<div class="sv-b"><div class="sv-h"><b>${title}</b><span class="muted small">${sub}</span></div>
+      <div class="sv-n"><span>Cost<small>what you paid</small></span><b>${fmt(c)}</b>${extra ? `<i>${extra[0]}</i>` : ''}</div>
+      <div class="sv-n"><span>Selling value<small>if all sold</small></span><b>${fmt(sl)}</b>${extra ? `<i>${extra[1]}</i>` : ''}</div>
+      <div class="sv-n pos"><span>Profit<small>expected</small></span><b>${fmt(pr)}</b></div></div>`;
+  return `<div class="card sv"><div class="row between" style="align-items:center"><h3 style="margin:0">Stock value</h3><span class="muted small">${fmtDate(v.at)} · <a href="#" data-act="sv-reload">refresh</a></span></div>
+    <div class="sv-grid">
+      ${blk('US$ products', fmtQty(v.usd.items) + ' items', v.usd.cost, v.usd.sell, prof(v.usd.cost, v.usd.sell), fmtUSD)}
+      ${blk('L$ products', fmtQty(v.lrd.items) + ' items', v.lrd.cost, v.lrd.sell, prof(v.lrd.cost, v.lrd.sell), fmtLRD)}
+      ${blk('All together', 'at L$' + fmtQty(v.rate) + ' = $1', v.combinedCostUSD, v.combinedSellUSD, v.combinedSellUSD - v.combinedCostUSD, fmtUSD, [fmtLRD(v.combinedCostUSD * v.rate), fmtLRD(v.combinedSellUSD * v.rate)])}
+    </div>
+    ${v.noCost.length ? `<details class="sv-miss"><summary>${icon('alert', 'sm')} ${v.noCost.length} product${v.noCost.length === 1 ? ' has' : 's have'} no cost price — not counted in cost</summary>
+      <div class="muted small">${v.noCost.map(esc).join(' · ')}</div><div class="small" style="margin-top:.3rem">Add it in Admin → Products → Edit.</div></details>` : ''}</div>`;
+}
+async function loadStockValue() {
+  S.ui.svLoading = true;
+  try { S.stockValue = await adminCall('stockValue', { storeId: store().StoreID }); } catch (e) { if (e.code !== 'AUTH') toast(e.message, 'bad'); }
+  S.ui.svLoading = false; renderBg();
+}
+
+/* ---------- Count the shelf: type what you count, save once ---------- */
+function countDraft() {
+  if (!S.countDraft) { try { S.countDraft = JSON.parse(localStorage.getItem(lsKey('sm-count')) || '{}'); } catch (e) { S.countDraft = {}; } }
+  return S.countDraft;
+}
+function saveCountDraft() { try { localStorage.setItem(lsKey('sm-count'), JSON.stringify(S.countDraft || {})); } catch (e) { /* ignore */ } }
+function countRows() {
+  const q = (S.ui.cntQ || '').toLowerCase(); const cat = S.ui.cntCat || '';
+  return (S.snap.products || []).filter((p) => p.Sells !== false && (!cat || p.Category === cat) &&
+    (!q || (p.Name + ' ' + optLabel(p) + ' ' + p.SKU).toLowerCase().indexOf(q) >= 0))
+    .sort((a, b) => (a.Category + pname(a)).localeCompare(b.Category + pname(b)));
+}
+function countSummary() {
+  const d = countDraft(); const stock = stockMap();
+  const ids = Object.keys(d).filter((k) => d[k] !== '' && d[k] !== undefined && productById(k));
+  const diffs = ids.map((k) => ({ p: productById(k), was: stock[k] || 0, now: num(d[k]) })).filter((x) => Math.abs(x.now - x.was) > 1e-9);
+  return { counted: ids.length, diffs };
+}
+function viewCount() {
+  if (!can('STOCK_ADJUST')) return '<div class="card empty">You do not have permission to count stock.</div>';
+  const d = countDraft(); const stock = stockMap();
+  const rows = countRows();
+  const cats = Array.from(new Set((S.snap.products || []).map((p) => p.Category))).sort();
+  const sm = countSummary();
+  const total = (S.snap.products || []).filter((p) => p.Sells !== false).length;
+  return `<div class="page-head"><div><button class="btn ghost sm" data-act="go" data-view="stock"><span style="display:inline-flex;transform:rotate(180deg)">${icon('arrow', 'sm')}</span> Back to stock</button><h2 style="margin-top:.3rem">Count the shelf</h2>
+      <div class="sub">Type what you actually count. Leave blank what you did not count. Nothing changes until you save.</div></div></div>
+    <div class="row" style="gap:.5rem;flex-wrap:wrap;margin-bottom:.6rem"><div class="searchbox grow" style="max-width:360px">${icon('search')}<input id="cnt-q" type="text" placeholder="Find product or colour" value="${esc(S.ui.cntQ || '')}" data-input="cnt-q"></div>
+      <select data-input="cnt-cat" style="max-width:200px"><option value="">All categories</option>${cats.map((c) => `<option ${c === (S.ui.cntCat || '') ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+    <div class="card cnt-list">${rows.map((p) => {
+      const was = stock[p.ProductID] || 0; const v = d[p.ProductID];
+      const has = v !== undefined && v !== '';
+      const diff = has ? r2(num(v) - was) : null;
+      return `<div class="cnt-row ${has ? (diff ? 'chg' : 'same') : ''}" id="cr-${esc(p.ProductID)}">
+        ${colourSwatch(p.Colour) || ''}<span class="grow"><b>${esc(pname(p))}</b><div class="muted small">${esc(p.Category)} · system says <b>${fmtQty(was)} ${esc(p.Unit || '')}</b></div></span>
+        <span class="cnt-diff">${has ? (diff ? (diff > 0 ? '+' : '') + fmtQty(diff) : '✓') : ''}</span>
+        <input id="cnt-${esc(p.ProductID)}" class="cnt-in" type="number" inputmode="decimal" min="0" step="any" placeholder="${fmtQty(was)}" value="${has ? esc(v) : ''}" data-input="cnt" data-id="${esc(p.ProductID)}">
+      </div>`; }).join('') || '<div class="empty">Nothing here</div>'}</div>
+    <div class="cnt-bar"><span id="cnt-sum"><b>${sm.counted}</b> of ${total} counted · <b>${sm.diffs.length}</b> different</span>
+      <span class="row" style="gap:.4rem">${sm.counted ? '<button class="btn ghost sm" data-act="cnt-clear">Start again</button>' : ''}
+      <button class="btn primary" data-act="cnt-review" ${sm.counted ? '' : 'disabled'} id="cnt-save">${icon('check', 'sm')} Save count</button></span></div>`;
+}
+function countReviewModal() {
+  const sm = countSummary();
+  return `<div class="modal-head"><h2>Save the count?</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <p>${sm.counted} item${sm.counted === 1 ? '' : 's'} counted. ${sm.diffs.length ? `<b>${sm.diffs.length}</b> ${sm.diffs.length === 1 ? 'is' : 'are'} different from the system and will be corrected:` : 'Everything matches the system — nothing to correct.'}</p>
+    ${sm.diffs.length ? `<div class="cnt-review">${sm.diffs.map((x) => `<div class="list-item"><span class="grow">${esc(pname(x.p))}</span><span class="muted">${fmtQty(x.was)} → <b>${fmtQty(x.now)}</b></span>
+      <b class="${x.now > x.was ? 'pos' : 'neg'}" style="min-width:3.5rem;text-align:right">${x.now > x.was ? '+' : ''}${fmtQty(r2(x.now - x.was))}</b></div>`).join('')}</div>` : ''}
+    <div class="row" style="gap:.5rem;margin-top:1rem"><button class="btn ghost" data-act="close">Keep counting</button>
+      <button class="btn primary grow" data-act="cnt-save">${sm.diffs.length ? 'Save and correct stock' : 'Finish'}</button></div>`;
+}
+const COUNT_ACTS = {
+  'stock-f': (el) => { S.ui.stockF = el.dataset.f; render(); },
+  'stock-open': (el) => { S.ui.stockOpen = S.ui.stockOpen === el.dataset.id ? '' : el.dataset.id; render(); },
+  'sv-reload': (el, ev) => { if (ev) ev.preventDefault(); S.stockValue = null; loadStockValue(); },
+  'cnt-review': () => showModal(countReviewModal),
+  'cnt-clear': () => { if (!confirm('Clear all the numbers you typed?')) return; S.countDraft = {}; saveCountDraft(); render(); },
+  'cnt-save': () => {
+    const sm = countSummary();
+    if (sm.diffs.length) {
+      enqueue('stockAdjust', { reason: 'Shelf count', items: sm.diffs.map((x) => ({ productId: x.p.ProductID, countedQty: x.now, qty: r2(x.now - x.was), note: 'counted ' + x.now + ', system ' + x.was })) });
+    }
+    toast(sm.diffs.length ? 'Count saved — ' + sm.diffs.length + ' corrected' : 'Count finished — everything matched', 'ok');
+    S.countDraft = {}; saveCountDraft(); S.stockValue = null;
+    closeModal(); S.view = 'stock'; render();
+  }
+};
+function countInput(el) {
+  const d = countDraft(); d[el.dataset.id] = el.value; saveCountDraft();
+  const was = stockMap()[el.dataset.id] || 0; const row = document.getElementById('cr-' + el.dataset.id);
+  const has = el.value !== ''; const diff = has ? r2(num(el.value) - was) : null;
+  if (row) { row.className = 'cnt-row ' + (has ? (diff ? 'chg' : 'same') : ''); row.querySelector('.cnt-diff').textContent = has ? (diff ? (diff > 0 ? '+' : '') + fmtQty(diff) : '✓') : ''; }
+  const sm = countSummary(); const total = (S.snap.products || []).filter((p) => p.Sells !== false).length;
+  const sum = document.getElementById('cnt-sum'); if (sum) sum.innerHTML = `<b>${sm.counted}</b> of ${total} counted · <b>${sm.diffs.length}</b> different`;
+  const b = document.getElementById('cnt-save'); if (b) b.disabled = !sm.counted;
 }
 
 function productOptions(sel) {
-  return (S.snap.products || []).map((p) => `<option value="${esc(p.ProductID)}" ${p.ProductID === sel ? 'selected' : ''}>${esc(p.Name)}</option>`).join('');
+  return (S.snap.products || []).slice().sort((a, b) => pname(a).localeCompare(pname(b))).map((p) => `<option value="${esc(p.ProductID)}" ${p.ProductID === sel ? 'selected' : ''}>${esc(pname(p))}</option>`).join('');
 }
 
 let lines = []; // shared editable item lines for intake / adjust / transfer forms
@@ -1971,17 +2196,65 @@ function adminDevices() {
 }
 
 function adminProducts() {
-  const list = S.admin.products || [];
+  const list = (S.admin.products || []).slice().sort((a, b) => (a.Name + '|' + optLabel(a)).localeCompare(b.Name + '|' + optLabel(b)));
   const showCost = can('VIEW_COST_PROFIT');
-  return `<div class="row between" style="margin-bottom:.6rem"><span class="muted">${list.length} product(s) in the shared catalog</span>
-      ${can('PRODUCT_MANAGE') ? `<button class="btn primary" data-act="np-open">${icon('plus', 'sm')} New product</button>` : ''}</div>
-    <div class="card table-wrap"><table><thead><tr><th>Product</th><th>Category</th>${showCost ? '<th class="right">Cost</th>' : ''}<th class="right">Price</th><th class="right">Reorder</th><th></th></tr></thead><tbody>
-    ${list.map((p) => `<tr><td><b>${esc(p.Name)}</b><div class="muted small">${esc(p.SKU || '')} · ${esc(p.Unit || '')}${p.Status !== 'ACTIVE' ? ' · ' + esc(p.Status) : ''}</div></td><td>${esc(p.Category)}</td>
+  const sel = S.ui.grpSel;
+  const pm = can('PRODUCT_MANAGE');
+  return `<div class="row between" style="margin-bottom:.6rem;flex-wrap:wrap;gap:.5rem"><span class="muted">${list.length} product(s) in the shared catalog</span>
+      <span class="row" style="gap:.4rem">${pm && !sel ? `<button class="btn" data-act="grp-start">${icon('palette', 'sm')} Put together as colours</button>` : ''}
+      ${pm ? `<button class="btn primary" data-act="np-open">${icon('plus', 'sm')} New product</button>` : ''}</span></div>
+    ${sel ? `<div class="grp-bar"><span>${icon('palette', 'sm')} Tick the products that are the <b>same item in different colours / sizes</b> (e.g. Ankara blue, Ankara red). <b>${sel.length}</b> ticked.</span>
+      <span class="row" style="gap:.4rem"><button class="btn ghost sm" data-act="grp-cancel">Cancel</button><button class="btn primary sm" data-act="grp-next" ${sel.length < 2 ? 'disabled' : ''}>Next</button></span></div>` : ''}
+    <div class="card table-wrap"><table><thead><tr>${sel ? '<th></th>' : ''}<th>Product</th><th>Category</th>${showCost ? '<th class="right">Cost</th>' : ''}<th class="right">Price</th><th class="right">Reorder</th><th></th></tr></thead><tbody>
+    ${list.map((p) => `<tr class="${p.GroupID ? 'in-grp' : ''}">${sel ? `<td><input type="checkbox" data-act="grp-tick" data-id="${esc(p.ProductID)}" ${sel.indexOf(p.ProductID) >= 0 ? 'checked' : ''}></td>` : ''}
+      <td>${p.GroupID ? colourSwatch(p.Colour) : ''}<b>${esc(p.Name)}</b>${optLabel(p) ? ` <span class="badge info">${esc(optLabel(p))}</span>` : ''}
+        <div class="muted small">${esc(p.SKU || '')} · ${esc(p.Unit || '')}${num(p.PieceYards) > 0 ? ' · full piece ' + fmtQty(p.PieceYards) + ' yd = ' + fmtCur(p.PiecePrice, p.PriceCurrency) : ''}${p.Status !== 'ACTIVE' ? ' · ' + esc(p.Status) : ''}</div></td><td>${esc(p.Category)}</td>
       ${showCost ? `<td class="right num">${fmtCur(p.CostPrice, p.PriceCurrency)}</td>` : ''}<td class="right num">${fmtCur(p.SellingPrice, p.PriceCurrency)}</td><td class="right num">${fmtQty(p.ReorderLevel)}</td>
-      <td class="right">${can('PRODUCT_MANAGE') ? `<button class="btn sm" data-act="product-edit" data-id="${esc(p.ProductID)}">Edit</button>` : ''}
+      <td class="right">${pm ? `<button class="btn sm" data-act="product-edit" data-id="${esc(p.ProductID)}">Edit</button>` : ''}
+        ${pm && p.GroupID ? `<button class="btn sm ghost" data-act="grp-out" data-id="${esc(p.ProductID)}" title="Make it a separate product again">Separate</button>` : ''}
         ${can('PRICE_MANAGE') && store().StoreID !== 'HQ' ? `<button class="btn sm ghost" data-act="store-price" data-id="${esc(p.ProductID)}">Price here</button>` : ''}</td></tr>`).join('')}
     </tbody></table></div>`;
 }
+function commonPrefix(names) {
+  const w = names.map((n) => String(n).split(/\s+/));
+  const out = [];
+  for (let i = 0; i < w[0].length; i++) { if (w.every((x) => x[i] && x[i].toLowerCase() === w[0][i].toLowerCase())) out.push(w[0][i]); else break; }
+  return out.join(' ').replace(/[\s,–—-]+$/, '');
+}
+function groupModal() {
+  const ps = S.ui.grpSel.map((id) => (S.admin.products || []).find((p) => p.ProductID === id)).filter(Boolean);
+  const base = ps.find((p) => p.GroupID) ? ps.find((p) => p.GroupID).Name : commonPrefix(ps.map((p) => p.Name)) || ps[0].Name;
+  const rest = (p) => p.Colour || String(p.Name).slice(base.length).replace(/^[\s,–—()-]+|[\s()]+$/g, '').trim();
+  return `<div class="modal-head"><h2>Put together as one product</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <form data-form="grp-save">
+      <div class="field"><label>Product name (without the colour)</label><input name="name" type="text" required value="${esc(base)}"></div>
+      <p class="muted small">Each one keeps its own stock, price and sales history. Type its colour (and size if needed):</p>
+      <div class="grp-rows">${ps.map((p, i) => `<div class="grp-row"><span class="muted small">${esc(p.Name)}${optLabel(p) ? ' — ' + esc(optLabel(p)) : ''}</span>
+        <input name="c_${i}" type="text" placeholder="Colour" value="${esc(rest(p))}" maxlength="30"><input name="s_${i}" type="text" placeholder="Size (optional)" value="${esc(p.Size || '')}" maxlength="30"></div>`).join('')}</div>
+      <button class="btn primary block" type="submit" style="margin-top:.8rem">Put together</button></form>`;
+}
+const GRP_ACTS = {
+  'grp-start': () => { S.ui.grpSel = []; render(); },
+  'grp-cancel': () => { S.ui.grpSel = null; render(); },
+  'grp-tick': (el) => { const a = S.ui.grpSel; const i = a.indexOf(el.dataset.id); if (i >= 0) a.splice(i, 1); else a.push(el.dataset.id); render(); },
+  'grp-next': () => showModal(groupModal),
+  'grp-out': async (el) => {
+    const p = (S.admin.products || []).find((x) => x.ProductID === el.dataset.id);
+    if (!p || !confirm('Make "' + pname(p) + '" a separate product again?')) return;
+    try { await adminCall('ungroupProduct', { productId: p.ProductID }); S.admin = await adminCall('adminData', {}); toast('Separated', 'ok'); render(); sync(false); }
+    catch (e) { toast(e.message, 'bad'); }
+  }
+};
+const GRP_FORMS = {
+  'grp-save': async (f) => {
+    const items = S.ui.grpSel.map((id, i) => ({ productId: id, colour: f.elements['c_' + i].value.trim(), size: f.elements['s_' + i].value.trim() }));
+    const b = f.querySelector('[type=submit]'); b.disabled = true; b.textContent = 'Saving…';
+    try {
+      await adminCall('groupProducts', { name: f.name.value.trim(), items });
+      S.admin = await adminCall('adminData', {}); S.ui.grpSel = null; closeModal(); toast('Put together — one tile on the till now', 'ok'); render(); sync(false);
+    } catch (e) { toast(e.message, 'bad'); b.disabled = false; b.textContent = 'Put together'; }
+  }
+};
 
 function productForm(p) {
   p = p || { PriceCurrency: 'USD', Status: 'ACTIVE' };
@@ -1998,6 +2271,10 @@ function productForm(p) {
       <div class="grid3"><div class="field"><label>SKU</label><input name="sku" type="text" value="${esc(p.SKU || '')}"></div>
         <div class="field"><label>Barcode</label><input name="barcode" type="text" value="${esc(p.Barcode || '')}"></div>
         <div class="field"><label>Reorder level</label><input name="reorderLevel" type="number" step="any" value="${esc(p.ReorderLevel || '')}"></div></div>
+      ${p.GroupID ? `<div class="grid2"><div class="field"><label>Colour</label><input name="colour" type="text" value="${esc(p.Colour || '')}" maxlength="30"></div>
+        <div class="field"><label>Size</label><input name="size" type="text" value="${esc(p.Size || '')}" maxlength="30"></div></div>` : ''}
+      <div class="grid2"><div class="field"><label>Yards in a full piece <span class="muted small">(empty = not sold by the piece)</span></label><input name="pieceYards" type="number" step="any" min="0" value="${esc(p.PieceYards || '')}"></div>
+        <div class="field"><label>Price of a full piece</label><input name="piecePrice" type="number" step="any" min="0" value="${esc(p.PiecePrice || '')}"></div></div>
       <div class="field"><label>Status</label><select name="status"><option ${p.Status === 'ACTIVE' ? 'selected' : ''}>ACTIVE</option><option ${p.Status === 'INACTIVE' ? 'selected' : ''}>INACTIVE</option></select></div>
       <button class="btn primary block" type="submit">Save product</button></form>`;
 }
@@ -2029,13 +2306,20 @@ function newProductModal() {
       <div class="field"><label>Product name</label><input name="name" type="text" required placeholder="e.g. Super Wax Print, blue (6 yards)"></div>
       <div class="grid2"><div class="field"><label>Category</label><select name="category">${cats.map((c) => `<option ${c.Name === d.category ? 'selected' : ''}>${esc(c.Name)}</option>`).join('')}</select></div>
         <div class="field"><label>Sold by (unit)</label><input name="unit" type="text" list="np-units" value="${esc(d.unit)}"><datalist id="np-units">${['piece', 'yard', 'set', 'pair', 'dozen', 'roll', 'bundle'].map((u) => `<option value="${u}">`).join('')}</datalist></div></div>
+      <div class="np-opts">
+        <label class="check"><input type="checkbox" data-act="np-flag" data-k="npHasVar" ${S.ui.npHasVar ? 'checked' : ''}> This product comes in <b>colours / sizes</b> (each with its own stock)</label>
+        <label class="check"><input type="checkbox" data-act="np-flag" data-k="npPiece" ${S.ui.npPiece ? 'checked' : ''}> Also sold as a <b>full piece</b> (e.g. 6 yards) at a piece price</label></div>
       <div class="grid3"><div class="field"><label>Currency</label><select name="priceCurrency"><option ${d.currency === 'USD' ? 'selected' : ''}>USD</option><option ${d.currency === 'LRD' ? 'selected' : ''}>LRD</option></select></div>
-        <div class="field"><label>Selling price</label><input name="sellingPrice" type="number" step="any" min="0" required inputmode="decimal"></div>
-        ${can('VIEW_COST_PROFIT') ? `<div class="field"><label>Cost price <span class="muted small">(what you paid)</span></label><input name="costPrice" type="number" step="any" min="0" inputmode="decimal"></div>` : '<div></div>'}</div>
-      ${stockMode ? `<div class="np-stock"><div class="field" style="margin:0"><label>Quantity in stock now</label><input name="qty" type="number" step="any" min="0" inputmode="decimal" class="bigin" placeholder="0"></div>
+        ${S.ui.npHasVar && S.ui.npDiffPrice ? '<div class="field"><label>Prices</label><div class="muted small" style="padding-top:.6rem">set for each colour below</div></div><div></div>' : `<div class="field"><label>Selling price${S.ui.npPiece ? ' <span class="muted small">(per yard)</span>' : ''}</label><input name="sellingPrice" type="number" step="any" min="0" required inputmode="decimal"></div>
+        ${can('VIEW_COST_PROFIT') ? `<div class="field"><label>Cost price <span class="muted small">(what you paid)</span></label><input name="costPrice" type="number" step="any" min="0" inputmode="decimal"></div>` : '<div></div>'}`}</div>
+      ${S.ui.npPiece ? `<div class="grid2 np-piece"><div class="field"><label>Yards in a full piece</label><input name="pieceYards" type="number" step="any" min="0" inputmode="decimal" placeholder="6" required></div>
+        <div class="field"><label>Price of a full piece</label><input name="piecePrice" type="number" step="any" min="0" inputmode="decimal" required></div></div>
+        <p class="muted small" style="margin:-.3rem 0 .6rem">Stock is kept in yards. Selling a full piece takes that many yards off the same stock.</p>` : ''}
+      ${S.ui.npHasVar ? npVariantsBlock() : ''}
+      ${stockMode && !S.ui.npHasVar ? `<div class="np-stock"><div class="field" style="margin:0"><label>Quantity in stock now</label><input name="qty" type="number" step="any" min="0" inputmode="decimal" class="bigin" placeholder="0"></div>
           <div class="field" style="margin:0"><label>Warn me when it gets down to</label><input name="reorderLevel" type="number" step="any" min="0" inputmode="decimal" placeholder="e.g. 3"></div></div>
           <p class="muted small" style="margin:.3rem 0 .6rem">Count what is on the shelf at ${esc(store().Name)}. Later changes: Stock → ${feature('Suppliers') ? 'Receive stock' : 'Add stock'} or Adjust / count.</p>`
-        : `<div class="field"><label>Warn me when stock gets down to</label><input name="reorderLevel" type="number" step="any" min="0"></div>${store().StoreID === 'HQ' ? '<p class="muted small">Stock is added from a shop phone (Stock → Add stock).</p>' : ''}`}
+        : `<div class="field"><label>Warn me when ${S.ui.npHasVar ? 'a colour' : 'stock'} gets down to</label><input name="reorderLevel" type="number" step="any" min="0"></div>${store().StoreID === 'HQ' ? '<p class="muted small">Stock is added from a shop phone (Stock → Add stock).</p>' : ''}`}
       ${shopOn ? `<div class="np-online"><label class="check" style="margin:0"><input type="checkbox" name="showOnline" ${d.showOnline ? 'checked' : ''}> Show in the online shop</label>
         <div class="field"><label>Description for customers <span class="muted small">(optional)</span></label><textarea name="description" rows="2" placeholder="Colour, size, material…"></textarea></div>
         <div class="grid2"><div class="field"><label>Label</label><select name="onlineTag"><option value="">None</option><option value="NEW">New</option><option value="FEATURED">Featured</option></select></div>
@@ -2050,7 +2334,10 @@ function newProductModal() {
     </form>`;
 }
 const NP_ACTS = {
-  'np-open': () => { S.ui.npPhoto = null; showModal(newProductModal, true); setTimeout(() => { const n = $('.modal [name=name]'); if (n) n.focus(); }, 50); },
+  'np-flag': (el) => { S.ui[el.dataset.k] = el.checked; if (el.dataset.k === 'npHasVar' && el.checked && !S.ui.npVars) S.ui.npVars = [{}, {}]; npRefresh(); },
+  'np-var-add': () => { npReadVars(); S.ui.npVars.push({}); npRefresh(); const f = $('form[data-form=new-product]'); const n = f && f.elements['v_colour_' + (S.ui.npVars.length - 1)]; if (n) n.focus(); },
+  'np-var-del': (el) => { npReadVars(); S.ui.npVars.splice(+el.dataset.i, 1); npRefresh(); },
+  'np-open': () => { S.ui.npPhoto = null; S.ui.npVars = null; S.ui.npHasVar = false; S.ui.npSizes = false; S.ui.npDiffPrice = false; S.ui.npPiece = false; showModal(newProductModal, true); setTimeout(() => { const n = $('.modal [name=name]'); if (n) n.focus(); }, 50); },
   'np-pick': (el) => { const f = $(el.dataset.src === 'camera' ? '#np-camera' : '#np-gallery'); f.value = ''; f.click(); },
   'np-photo-clear': () => { S.ui.npPhoto = null; npRefresh(); },
   'np-save': (el) => { S.ui.npAgain = !!el.dataset.again; const f = $('form[data-form=new-product]'); if (f.reportValidity()) f.requestSubmit(); }
@@ -2058,12 +2345,40 @@ const NP_ACTS = {
 /** Redraw the form without losing what was typed. */
 function npRefresh() {
   const f = $('form[data-form=new-product]'); if (!f) return;
-  const vals = {}; Array.from(f.elements).forEach((e) => { if (e.name) vals[e.name] = e.type === 'checkbox' ? e.checked : e.value; });
+  npReadVars();
+  const vals = {}; Array.from(f.elements).forEach((e) => { if (e.name && e.name.indexOf('v_') !== 0) vals[e.name] = e.type === 'checkbox' ? e.checked : e.value; });
   const open = f.querySelector('details') && f.querySelector('details').open;
   refreshModal();
   const g = $('form[data-form=new-product]');
   Object.keys(vals).forEach((k) => { const e = g.elements[k]; if (!e) return; if (e.type === 'checkbox') e.checked = vals[k]; else e.value = vals[k]; });
   if (open) g.querySelector('details').open = true;
+}
+function npVariantsBlock() {
+  const rows = S.ui.npVars && S.ui.npVars.length ? S.ui.npVars : (S.ui.npVars = [{}, {}]);
+  const sizes = !!S.ui.npSizes; const diff = !!S.ui.npDiffPrice; const cost = diff && can('VIEW_COST_PROFIT');
+  const stockMode = openingStockMode();
+  const cols = ['Colour'].concat(sizes ? ['Size'] : [], stockMode ? ['Qty now'] : [], diff ? ['Price'] : [], cost ? ['Cost'] : []);
+  return `<div class="np-vars">
+    <div class="row" style="gap:1rem;flex-wrap:wrap"><label class="check" style="margin:0"><input type="checkbox" data-act="np-flag" data-k="npSizes" ${sizes ? 'checked' : ''}> Sizes too</label>
+      <label class="check" style="margin:0"><input type="checkbox" data-act="np-flag" data-k="npDiffPrice" ${diff ? 'checked' : ''}> Different price for each</label></div>
+    <div class="np-vgrid" style="--cols:${cols.length}">${cols.map((c) => `<span class="np-vh">${c}</span>`).join('')}<span></span>
+      ${rows.map((r, i) => `<input name="v_colour_${i}" type="text" placeholder="${['Blue', 'Red', 'Gold', 'Green'][i % 4]}" value="${esc(r.colour || '')}" maxlength="30">
+        ${sizes ? `<input name="v_size_${i}" type="text" list="np-sizes" placeholder="M" value="${esc(r.size || '')}" maxlength="30">` : ''}
+        ${stockMode ? `<input name="v_qty_${i}" type="number" step="any" min="0" inputmode="decimal" placeholder="0" value="${esc(r.qty || '')}">` : ''}
+        ${diff ? `<input name="v_price_${i}" type="number" step="any" min="0" inputmode="decimal" value="${esc(r.price || '')}">` : ''}
+        ${cost ? `<input name="v_cost_${i}" type="number" step="any" min="0" inputmode="decimal" value="${esc(r.cost || '')}">` : ''}
+        <button type="button" class="btn ghost icon sm" data-act="np-var-del" data-i="${i}" title="Remove" ${rows.length < 2 ? 'disabled' : ''}>${icon('trash', 'sm')}</button>`).join('')}
+    </div>
+    <datalist id="np-sizes">${['XS', 'S', 'M', 'L', 'XL', 'XXL', 'Child', 'Adult', 'Free size'].map((u) => `<option value="${u}">`).join('')}</datalist>
+    <button type="button" class="btn sm" data-act="np-var-add">${icon('plus', 'sm')} Add ${sizes ? 'colour / size' : 'colour'}</button>
+  </div>`;
+}
+function npReadVars() {
+  const f = $('form[data-form=new-product]'); if (!f || !S.ui.npVars) return;
+  S.ui.npVars = S.ui.npVars.map((r, i) => {
+    const g = (k) => (f.elements['v_' + k + '_' + i] ? f.elements['v_' + k + '_' + i].value : r[k] || '');
+    return { colour: g('colour'), size: g('size'), qty: g('qty'), price: g('price'), cost: g('cost') };
+  });
 }
 function npPhotoChosen(file) {
   if (!file) return;
@@ -2076,42 +2391,66 @@ const NP_FORMS = {
     const ck = (n) => !!(f.elements[n] && f.elements[n].checked);
     const body = { name: v('name'), category: v('category'), unit: v('unit') || 'piece', priceCurrency: v('priceCurrency'), sellingPrice: num(v('sellingPrice')),
       reorderLevel: num(v('reorderLevel')), sku: v('sku'), barcode: v('barcode'), status: 'ACTIVE' };
-    if (!(body.sellingPrice > 0)) { toast('Enter the selling price', 'bad'); return; }
+    const hasVar = !!S.ui.npHasVar; const diff = hasVar && !!S.ui.npDiffPrice;
+    let vars = [];
+    if (hasVar) {
+      npReadVars();
+      vars = (S.ui.npVars || []).filter((r) => String(r.colour || '').trim() || String(r.size || '').trim());
+      if (!vars.length) { toast('Type at least one colour' + (S.ui.npSizes ? ' or size' : ''), 'bad'); return; }
+      if (diff && vars.some((r) => !(num(r.price) > 0))) { toast('Enter a price for each colour', 'bad'); return; }
+    }
+    if (!diff && !(body.sellingPrice > 0)) { toast('Enter the selling price', 'bad'); return; }
+    if (S.ui.npPiece) {
+      body.pieceYards = num(v('pieceYards')); body.piecePrice = num(v('piecePrice'));
+      if (!(body.pieceYards > 0) || !(body.piecePrice > 0)) { toast('Enter the yards in a full piece and its price', 'bad'); return; }
+    }
     if (v('costPrice') !== '') body.costPrice = num(v('costPrice'));
     if (feature('OnlineShop')) {
       body.showOnline = ck('showOnline'); body.description = v('description'); body.onlineTag = v('onlineTag');
       if (v('salePrice') !== '') body.salePrice = num(v('salePrice'));
       body.personalise = ck('personalise'); if (v('leadDays') !== '') body.leadDays = num(v('leadDays'));
     }
-    const qty = num(v('qty'));
+    const qty = hasVar ? 0 : num(v('qty'));
     const again = S.ui.npAgain;
     const btns = f.querySelectorAll('button[data-act=np-save]'); btns.forEach((b) => { b.disabled = true; });
     const busy = f.querySelector('button.primary'); const label = busy.innerHTML; busy.textContent = 'Saving…';
     try {
-      const prod = (await adminCall('upsertProduct', body)).product;
       if (S.ui.npPhoto) {
         busy.textContent = 'Uploading photo…';
-        try { prod.ImageURL = (await adminCall('uploadImage', { productId: prod.ProductID, dataUrl: S.ui.npPhoto, name: prod.Name })).url; }
-        catch (e) { toast('Product saved, but the photo did not upload: ' + e.message + ' — add it later in Admin → Online shop', 'bad'); }
+        try { body.imageUrl = (await adminCall('uploadImage', { productId: '', dataUrl: S.ui.npPhoto, name: body.name })).url; }
+        catch (e) { toast('The photo did not upload: ' + e.message + ' — the product is saved without it; add it later in Admin → Online shop', 'bad'); }
+        busy.textContent = 'Saving…';
       }
+      let prods;
+      if (hasVar) {
+        const base = Object.assign({}, body); delete base.sellingPrice; delete base.costPrice; delete base.sku; delete base.barcode;
+        const r = await adminCall('createVariants', { base, variants: vars.map((x) => ({ colour: x.colour.trim(), size: String(x.size || '').trim(),
+          sellingPrice: diff ? num(x.price) : body.sellingPrice, costPrice: diff ? (x.cost !== '' ? num(x.cost) : undefined) : body.costPrice })) });
+        prods = r.products;
+      } else prods = [(await adminCall('upsertProduct', body)).product];
+      const prod = prods[0];
       // usable on this phone straight away (the next sync brings the full details)
-      const local = { ProductID: prod.ProductID, SKU: prod.SKU, Barcode: prod.Barcode, Name: prod.Name, Category: prod.Category, Unit: prod.Unit,
-        PriceCurrency: prod.PriceCurrency, SellingPrice: num(prod.SalePrice) > 0 ? num(prod.SalePrice) : num(prod.SellingPrice),
-        RegularPrice: num(prod.SalePrice) > 0 ? num(prod.SellingPrice) : '', ImageURL: prod.ImageURL || '', ReorderLevel: prod.ReorderLevel, Sells: true };
-      S.snap.products = (S.snap.products || []).filter((p) => p.ProductID !== prod.ProductID).concat([local]);
+      const locals = prods.map((x) => ({ ProductID: x.ProductID, SKU: x.SKU, Barcode: x.Barcode, Name: x.Name, Category: x.Category, Unit: x.Unit,
+        PriceCurrency: x.PriceCurrency, SellingPrice: num(x.SalePrice) > 0 ? num(x.SalePrice) : num(x.SellingPrice),
+        RegularPrice: num(x.SalePrice) > 0 ? num(x.SellingPrice) : '', ImageURL: x.ImageURL || '', ReorderLevel: x.ReorderLevel, Sells: true,
+        GroupID: x.GroupID || '', Colour: x.Colour || '', Size: x.Size || '', PieceYards: num(x.PieceYards) || '', PiecePrice: num(x.PiecePrice) || '' }));
+      const ids = new Set(locals.map((x) => x.ProductID));
+      S.snap.products = (S.snap.products || []).filter((p) => !ids.has(p.ProductID)).concat(locals);
       persist.snap();
       const mode = openingStockMode();
-      if (qty > 0 && mode === 'intake') {
-        enqueue('stockIntake', { supplierId: '', invoiceNo: 'Opening stock', currency: prod.PriceCurrency, paidAmount: 0, note: 'Opening stock — new product',
-          items: [{ productId: prod.ProductID, qty, unitCost: body.costPrice || 0 }] });
-      } else if (qty > 0 && mode === 'adjust') {
-        enqueue('stockAdjust', { reason: 'Opening stock', items: [{ productId: prod.ProductID, qty }] });
+      const items = hasVar ? prods.map((x, i) => ({ productId: x.ProductID, qty: num(vars[i] && vars[i].qty), unitCost: num(x.CostPrice) || 0 })).filter((x) => x.qty > 0)
+        : (qty > 0 ? [{ productId: prod.ProductID, qty, unitCost: body.costPrice || 0 }] : []);
+      if (items.length && mode === 'intake') {
+        enqueue('stockIntake', { supplierId: '', invoiceNo: 'Opening stock', currency: prod.PriceCurrency, paidAmount: 0, note: 'Opening stock — new product', items });
+      } else if (items.length && mode === 'adjust') {
+        enqueue('stockAdjust', { reason: 'Opening stock', items: items.map((x) => ({ productId: x.productId, qty: x.qty })) });
       }
+      const totalQty = items.reduce((a, x) => a + x.qty, 0);
       S.ui.npLast = { category: body.category, currency: body.priceCurrency, unit: body.unit, showOnline: body.showOnline !== false };
       S.shopAdmin = null;
-      if (S.view === 'admin' && S.admin) { S.admin.products = (S.admin.products || []).concat([prod]); }
-      toast(prod.Name + ' added' + (qty > 0 ? ' with ' + fmtQty(qty) + ' ' + prod.Unit : ''), 'ok');
-      S.ui.npPhoto = null;
+      if (S.view === 'admin' && S.admin) { S.admin.products = (S.admin.products || []).concat(prods); }
+      toast(prod.Name + ' added' + (prods.length > 1 ? ' in ' + prods.length + ' colours' : '') + (totalQty > 0 ? ' with ' + fmtQty(totalQty) + ' ' + prod.Unit : ''), 'ok');
+      S.ui.npPhoto = null; S.ui.npVars = S.ui.npHasVar ? [{}, {}] : null; S.stockValue = null;
       if (again) { refreshModal(); const n = $('.modal [name=name]'); if (n) n.focus(); }
       else closeModal();
       render();
@@ -2380,6 +2719,10 @@ document.addEventListener('input', (e) => {
   const k = el.dataset && el.dataset.input;
   if (!k) return;
   if (k === 'pos-search') { S.ui.q = el.value; $('#pos-grid').innerHTML = posGrid(); }
+  if (k === 'cnt') { countInput(el); return; }
+  if (k === 'cnt-q') { S.ui.cntQ = el.value; render(); return; }
+  if (k === 'cnt-cat') { S.ui.cntCat = el.value; render(); return; }
+  if (k === 'stock-cat') { S.ui.stockCat = el.value; render(); return; }
   if (k === 'stock-q') { S.ui.stockQ = el.value; const pos = el.selectionStart; render(); const n = $('#stock-q'); n.focus(); n.setSelectionRange(pos, pos); }
   if (k === 'cust-q') { S.ui.custQ = el.value; refreshModal(); const n = $('#cust-q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }
   if (k === 'custlist-q') { S.ui.custListQ = el.value; render(); }
@@ -2410,7 +2753,9 @@ document.addEventListener('change', (e) => {
   if (k === 'qty') {
     const l = S.cart.lines[+el.dataset.i];
     let v = r2(el.value);
+    if (l.pieceYards) v = r2(Math.round(v) * l.pieceYards);
     if (v > l.qty && !stockOk(l, v)) v = Math.max(l.qty, Math.floor(stockLeft(l) / l.step) * l.step);
+    if (l.pieceYards) v = r2(Math.floor(v / l.pieceYards + 1e-9) * l.pieceYards);
     if (v <= 0) S.cart.lines.splice(+el.dataset.i, 1); else l.qty = v;
     render();
   }
@@ -2576,6 +2921,8 @@ const FORMS = {
     const body = { name: f.name.value.trim(), category: f.category.value, unit: f.unit.value.trim(), priceCurrency: f.priceCurrency.value,
       sellingPrice: num(f.sellingPrice.value), sku: f.sku.value.trim(), barcode: f.barcode.value.trim(), reorderLevel: num(f.reorderLevel.value), status: f.status.value };
     if (f.costPrice && f.costPrice.value !== '') body.costPrice = num(f.costPrice.value);
+    if (f.colour) { body.colour = f.colour.value.trim(); body.size = f.size.value.trim(); }
+    if (f.pieceYards) { body.pieceYards = f.pieceYards.value === '' ? '' : num(f.pieceYards.value); body.piecePrice = f.piecePrice.value === '' ? '' : num(f.piecePrice.value); }
     if (f.dataset.id) body.productId = f.dataset.id;
     try { await adminCall('upsertProduct', body); S.admin = await adminCall('adminData', {}); closeModal(); toast('Product saved', 'ok'); render(); sync(false); }
     catch (e) { toast(e.message, 'bad'); }
@@ -2733,7 +3080,10 @@ function saleDoc(r) {
   const lines = (r.items || []).map((i, k) => {
     const p = productById(i.productId) || {};
     sub += toUSDAt(i.unitPrice * i.qty, i.priceCurrency, rt);
-    return { desc: i.name || (r._names && r._names[k]) || p.Name || i.productId, qty: i.qty, unit: p.Unit || '', price: i.unitPrice, cur: i.priceCurrency, total: i.unitPrice * i.qty };
+    if (num(i.pieces) > 0 && num(i.pieceYards) > 0) {
+      return { desc: (r._names && r._names[k]) || pname(p) + ' — full piece', qty: num(i.pieces), unit: 'piece', price: i.unitPrice * num(i.pieceYards), cur: i.priceCurrency, total: i.unitPrice * i.qty };
+    }
+    return { desc: i.name || (r._names && r._names[k]) || pname(p) || i.productId, qty: i.qty, unit: p.Unit || '', price: i.unitPrice, cur: i.priceCurrency, total: i.unitPrice * i.qty };
   });
   const total = sub - num(r.discountUSD);
   const paid = (r.payments || []).reduce((s, p) => s + toUSDAt(p.amount, p.currency, rt), 0);
@@ -2892,8 +3242,8 @@ function emailModal() {
       <div class="row" style="gap:.5rem"><button class="btn ghost" type="button" data-act="doc-back">Back</button><button class="btn primary grow" type="submit">${icon('mail', 'sm')} Send</button></div></form>`;
 }
 
-Object.assign(ACT, INSTALL_ACTS, MONEY_ACTS, CAT_ACTS, NP_ACTS);
-Object.assign(FORMS, MONEY_FORMS, CAT_FORMS, NP_FORMS);
+Object.assign(ACT, INSTALL_ACTS, MONEY_ACTS, CAT_ACTS, NP_ACTS, PICK_ACTS, COUNT_ACTS, GRP_ACTS);
+Object.assign(FORMS, MONEY_FORMS, CAT_FORMS, NP_FORMS, GRP_FORMS);
 Object.assign(ACT, {
   'doc-paper': (el) => { S.ui.doc.paper = el.dataset.p; refreshModal(); },
   'doc-print': () => printDoc(S.ui.doc.d, S.ui.doc.paper),
