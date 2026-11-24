@@ -3,7 +3,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.7.1';
+const APP_VERSION = '1.8.0';
 const PIN_ROUNDS_DEFAULT = 100;
 const ICON_SRC = (typeof window !== 'undefined' && window.SM_ICON) || 'icons/icon-192.png';
 const AUTO_SYNC_MS = 120000;   // push + pull every 2 minutes while the app is open
@@ -165,6 +165,16 @@ const optLabel = (p) => [p.Colour, p.Size].map((x) => String(x || '').trim()).fi
 /** Full name with colour/size: "Ankara swirl — Blue". */
 const pname = (p) => (p ? (optLabel(p) ? p.Name + ' — ' + optLabel(p) : p.Name) : '');
 const hasPiece = (p) => num(p.PieceYards) > 0 && num(p.PiecePrice) > 0;
+const OPTION_NAMES = ['Colour', 'Pattern', 'Design', 'Style'];
+/** What the choices of a product are called: Colour (default), Pattern, Design, Style. */
+const optWord = (p) => (p && p.OptionName) || 'Colour';
+/** "3 patterns", "2 sizes", "4 colours" */
+function optCount(items) {
+  const n = items.length;
+  const onlySizes = items.some((x) => x.Size) && !items.some((x) => x.Colour);
+  const w = onlySizes ? 'size' : optWord(items[0]).toLowerCase();
+  return n + ' ' + w + (n === 1 ? '' : 's');
+}
 const groupOf = (gid) => (S.snap.products || []).filter((x) => x.GroupID === gid);
 
 async function sha256hex(s) {
@@ -525,12 +535,39 @@ function updateBanner() {
     <div class="small">Takes a few seconds. Your sales and data stay safe.</div></div>
     <button class="btn primary sm" data-act="app-update">Update now</button></div>`;
 }
-// the phone's Back button closes the cart sheet instead of leaving the app
-window.addEventListener('popstate', () => { if (S.ui && S.ui.showCart) { S.ui.showCart = false; render(); } });
+/* The phone's Back button: one step back inside the app (close a pop-up, the cart, or go to the previous screen).
+ * On the first screen it asks before closing. A "guard" history entry is kept so Back never leaves the app by itself. */
+let backExiting = false;
+function armBack() { try { if (!GAS && !(history.state && history.state.smGuard)) history.pushState({ smGuard: true }, ''); } catch (e) { /* ignore */ } }
+function exitModal() {
+  return `<div class="modal-head"><h2>Close the app?</h2></div>
+    <p class="muted">${S.queue.some((q) => q.status !== 'sent') ? `<b>${S.queue.filter((q) => q.status !== 'sent').length} record(s) are not synced yet</b> — they are kept on this phone and sync next time.` : 'Everything is synced.'}</p>
+    <div class="row" style="gap:.5rem;margin-top:1rem"><button class="btn grow" data-act="close">Stay</button><button class="btn primary grow" data-act="app-exit">Close app</button></div>`;
+}
+window.addEventListener('popstate', () => {
+  if (backExiting || GAS) return;
+  if (typeof modalFn !== 'undefined' && modalFn) { const was = modalFn; closeModal(); if (was === exitModal) { armBack(); return; } }
+  else if (S.ui && S.ui.showCart) { S.ui.showCart = false; render(); }
+  else if (S.session && S.navStack && S.navStack.length) { S.view = S.navStack.pop(); S.ui.backNav = true; render(); }
+  else showModal(exitModal);
+  armBack();
+});
+window.addEventListener('load', armBack);
+document.addEventListener('click', () => { if (!backExiting) armBack(); }, true);
 const PICK_ACTS = {
   pick: (el) => { S.ui.pickG = el.dataset.g || ''; S.ui.pickId = el.dataset.id || ''; showModal(pickModal); },
   'pick-add': (el) => {
     if (addToCart(el.dataset.id, el.dataset.m)) { const p = productById(el.dataset.id); toast('Added ' + (optLabel(p) || p.Name) + (el.dataset.m === 'piece' ? ' — full piece' : ''), 'ok'); refreshModal(); }
+  }
+};
+const BACK_ACTS = {
+  'app-exit': () => {
+    closeModal(); backExiting = true;
+    try { window.close(); } catch (e) { /* ignore */ }
+    // drop the guard: the next Back leaves the app (touching the screen again brings the guard back)
+    try { history.back(); } catch (e) { /* ignore */ }
+    setTimeout(() => { backExiting = false; }, 600);
+    toast('Press Back once more to close the app', 'ok');
   }
 };
 const INSTALL_ACTS = {
@@ -758,7 +795,7 @@ function posGrid() {
     const img = p.ImageURL ? (/lh3\.googleusercontent\.com\/d\/[\w-]+$/.test(p.ImageURL) ? p.ImageURL + '=w300' : p.ImageURL) : '';
     const out = t.qty <= 0;
     const act = t.multi ? `data-act="pick" ${t.group ? `data-g="${esc(t.group)}"` : `data-id="${esc(p.ProductID)}"`}` : `data-act="add" data-id="${esc(p.ProductID)}"`;
-    const opts = t.group ? t.items.length + ' ' + (t.items.some((x) => x.Size) && !t.items.some((x) => x.Colour) ? 'sizes' : 'colours') : hasPiece(p) ? 'piece or yard' : '';
+    const opts = t.group ? optCount(t.items) : hasPiece(p) ? 'piece or yard' : '';
     const price = t.min === t.max ? fmtCur(t.min, p.PriceCurrency) : 'from ' + fmtCur(t.min, p.PriceCurrency);
     return `${out && k === inStock.length && inStock.length ? '<div class="soldout-head">Sold out</div>' : ''}<button class="prod ${out ? 'out' : ''}" ${act} ${out && !allowNeg ? 'disabled' : ''}>
       <span class="thumb" style="--c1:${cc[0]};--c2:${cc[1]}">${img ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}<b>${esc(initials(p.Name))}</b>
@@ -781,7 +818,7 @@ function pickModal() {
   const img = p0.ImageURL ? (/lh3\.googleusercontent\.com\/d\/[\w-]+$/.test(p0.ImageURL) ? p0.ImageURL + '=w300' : p0.ImageURL) : '';
   items.sort((a, b) => (stock[b.ProductID] > 0) - (stock[a.ProductID] > 0) || optLabel(a).localeCompare(optLabel(b)));
   return `<div class="modal-head"><div class="row" style="gap:.7rem;align-items:center">${img ? `<img class="pick-img" src="${esc(img)}" alt="" referrerpolicy="no-referrer">` : ''}<h2>${esc(p0.Name)}</h2></div><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
-    <p class="muted small" style="margin-top:-.4rem">${S.ui.pickG ? 'Tap the colour / size the customer wants.' : ''} ${hasPiece(p0) ? 'Sell a <b>full piece</b> or <b>by the ' + esc(p0.Unit || 'yard') + '</b>.' : ''}</p>
+    <p class="muted small" style="margin-top:-.4rem">${S.ui.pickG ? 'Tap the ' + optWord(p0).toLowerCase() + ' the customer wants.' : ''} ${hasPiece(p0) ? 'Sell a <b>full piece</b> or <b>by the ' + esc(p0.Unit || 'yard') + '</b>.' : ''}</p>
     <div class="pick-list">${items.map((p) => {
       const q = stock[p.ProductID] || 0;
       const out = q <= 0 && !allowNeg;
@@ -1292,13 +1329,13 @@ function resizeImage(file, maxSide) {
     const img = new Image();
     const url = URL.createObjectURL(file);
     img.onload = () => {
-      const max = maxSide || 900;
+      const max = maxSide || 800;
       const k = Math.min(1, max / Math.max(img.width, img.height));
       const c = document.createElement('canvas');
       c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
       c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
       URL.revokeObjectURL(url);
-      resolve(c.toDataURL('image/jpeg', 0.82));
+      resolve(c.toDataURL('image/jpeg', max > 1000 ? 0.8 : 0.75));
     };
     img.onerror = () => reject(new Error('Could not read that photo'));
     img.src = url;
@@ -1361,7 +1398,7 @@ function viewStock() {
       const head = `<div class="st-row grp" data-act="pd-open" data-id="${esc(g.id)}">
         <span class="st-thumb">${thumb ? `<img src="${esc(imgSmall(thumb))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : `<b>${esc(initials(p.Name))}</b>`}<span class="st-dot ${g.state}"></span></span>
         <span class="grow"><b>${esc(g.multi ? p.Name : pname(p))}</b>
-          <div class="muted small">${esc(p.Category)}${g.multi ? ` · ${g.items.length} ${g.items.some((x) => x.Size) && !g.items.some((x) => x.Colour) ? 'sizes' : 'colours'}` : ''}${g.out && g.multi && g.qty > 0 ? ` · <span class="bad-t">${g.out} sold out</span>` : ''}${g.low ? ` · <span class="warn-t">${g.low} low</span>` : ''}</div></span>
+          <div class="muted small">${esc(p.Category)}${g.multi ? ` · ${optCount(g.items)}` : ''}${g.out && g.multi && g.qty > 0 ? ` · <span class="bad-t">${g.out} sold out</span>` : ''}${g.low ? ` · <span class="warn-t">${g.low} low</span>` : ''}</div></span>
         <span class="right"><b class="st-q ${g.state}">${g.qty <= 0 ? 'None' : qtyTxt(g.qty, p)}</b>${!g.multi ? pieceTxt(g.qty, p) : ''}
           <div class="muted small">${g.multi && new Set(g.items.map((x) => x.SellingPrice)).size > 1 ? 'from ' + fmtCur(Math.min(...g.items.map((x) => num(x.SellingPrice))), p.PriceCurrency) : fmtCur(p.SellingPrice, p.PriceCurrency)}${hasPiece(p) ? ' / ' + esc(p.Unit || 'yd') : ''}</div></span>
         <span class="st-chev">${icon('arrow', 'sm')}</span></div>`;
@@ -1418,12 +1455,17 @@ function productCard() {
   const q = stock[cur.ProductID] || 0;
   const total = items.reduce((a, x) => a + (stock[x.ProductID] || 0), 0);
   const full = S.admin && (S.admin.products || []).find((x) => x.ProductID === cur.ProductID);
-  if (!S.admin && !S.ui.pdLoading && S.session.token && navigator.onLine && (can('VIEW_COST_PROFIT') || can('PRODUCT_MANAGE'))) {
+  if ((!S.admin || (!full && S.ui.pdReloaded !== cur.ProductID)) && !S.ui.pdLoading && S.session.token && navigator.onLine && (can('VIEW_COST_PROFIT') || can('PRODUCT_MANAGE') || can('SHOP_MANAGE'))) {
+    S.ui.pdReloaded = cur.ProductID;
     S.ui.pdLoading = true;
     adminCall('adminData', {}).then((d) => { S.admin = d; }).catch(() => {}).then(() => { S.ui.pdLoading = false; if (modalFn === productCard) npSafeRefresh(); });
   }
-  const img = cur.ImageURL || (items.find((x) => x.ImageURL) || {}).ImageURL || '';
+  const extras = full ? String(full.MoreImages || '').split(/[\s,]+/).filter((u) => /^https?:\/\//.test(u)).slice(0, 6) : [];
+  const pics = [cur.ImageURL].filter(Boolean).concat(extras);
+  if ((S.ui.pdImg || 0) >= pics.length) S.ui.pdImg = 0;
   const own = !!cur.ImageURL;
+  const img = pics[S.ui.pdImg || 0] || cur.ImageURL || (items.find((x) => x.ImageURL) || {}).ImageURL || '';
+  const onExtra = (S.ui.pdImg || 0) > 0 && !!pics[S.ui.pdImg];
   const cc = catColor(cur.Name);
   const st = q <= 0 ? 'out' : q <= num(cur.ReorderLevel) ? 'low' : 'ok';
   const pieces = hasPiece(cur) && q > 0 ? Math.floor(q / num(cur.PieceYards)) : 0;
@@ -1434,15 +1476,18 @@ function productCard() {
     <div class="pd-photo" style="--c1:${cc[0]};--c2:${cc[1]}">
       ${img ? `<img src="${esc(imgBig(img))}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : `<b>${esc(initials(cur.Name))}</b>`}
       ${multi ? `<span class="pd-tag">${esc(optLabel(cur))}${img && !own ? ' · showing another colour\'s photo' : ''}</span>` : ''}
-      ${canPhoto() ? `<div class="pd-pbtns"><button class="btn sm" data-act="pd-photo" data-src="gallery">${icon('image', 'sm')} ${own ? 'Change photo' : 'Add photo'}</button>
-        <button class="btn sm" data-act="pd-photo" data-src="camera" title="Take photo">${icon('camera', 'sm')}</button></div>` : ''}
+      ${canPhoto() ? (onExtra ? `<div class="pd-pbtns"><button class="btn sm" data-act="pd-img-del">${icon('trash', 'sm')} Remove this photo</button></div>`
+        : `<div class="pd-pbtns"><button class="btn sm" data-act="pd-photo" data-src="gallery">${icon('image', 'sm')} ${own ? 'Change main photo' : 'Add photo'}</button>
+        <button class="btn sm" data-act="pd-photo" data-src="camera" title="Take photo">${icon('camera', 'sm')}</button></div>`) : ''}
       ${S.ui.pdUploading ? '<div class="pd-busy">Uploading photo…</div>' : ''}
     </div>
-    <input type="file" id="pd-gallery" accept="image/*" hidden><input type="file" id="pd-camera" accept="image/*" capture="environment" hidden>
+    <input type="file" id="pd-gallery" accept="image/*" hidden><input type="file" id="pd-camera" accept="image/*" capture="environment" hidden><input type="file" id="pd-more" accept="image/*" multiple hidden>
+    ${pics.length > 1 || (canPhoto() && full && own) ? `<div class="pd-thumbs">${pics.map((u, i) => `<button class="pd-th ${i === (S.ui.pdImg || 0) ? 'on' : ''}" data-act="pd-img" data-i="${i}"><img src="${esc(imgSmall(u))}" alt="" referrerpolicy="no-referrer">${i === 0 ? '<i>main</i>' : ''}</button>`).join('')}
+      ${canPhoto() && full && own && extras.length < 6 ? `<button class="pd-th add" data-act="pd-more" title="Add another photo">${icon('plus', 'sm')}<i>${extras.length}/6 more</i></button>` : ''}</div>` : ''}
     ${multi ? `<div class="pd-strip">${items.map((x) => { const qx = stock[x.ProductID] || 0; return `<button class="pd-opt ${x.ProductID === cur.ProductID ? 'on' : ''} ${qx <= 0 ? 'out' : ''}" data-act="pd-sel" data-id="${esc(x.ProductID)}">
         <span class="pd-ot">${x.ImageURL ? `<img src="${esc(imgSmall(x.ImageURL))}" alt="" referrerpolicy="no-referrer">` : colourSwatch(x.Colour) || '<i></i>'}</span>
         <b>${esc(optLabel(x))}</b><small>${qx <= 0 ? 'none' : fmtQty(qx) + ' ' + esc(x.Unit || '')}</small></button>`; }).join('')}</div>
-      <div class="muted small" style="margin:-.2rem 0 .6rem">${items.length} ${items.some((x) => x.Size) && !items.some((x) => x.Colour) ? 'sizes' : 'colours'} · ${fmtQty(total)} ${esc(cur.Unit || '')} altogether. Tap a colour to see it.</div>` : ''}
+      <div class="muted small" style="margin:-.2rem 0 .6rem">${optCount(items)} · ${fmtQty(total)} ${esc(cur.Unit || '')} altogether. Tap one to see it.</div>` : ''}
     <div class="pd-facts">
       ${fact('In stock' + (multi ? ' — ' + esc(optLabel(cur)) : ''), q <= 0 ? 'None' : fmtQty(q) + ' ' + esc(cur.Unit || '') + (pieces ? ` <small>≈ ${pieces} full piece${pieces === 1 ? '' : 's'}</small>` : ''), st)}
       ${fact('Price', (sale ? `<s class="muted">${fmtCur(cur.RegularPrice, cur.PriceCurrency)}</s> ` : '') + fmtCur(cur.SellingPrice, cur.PriceCurrency) + (cur.Unit ? ` <small>/ ${esc(cur.Unit)}</small>` : ''))}
@@ -1454,7 +1499,7 @@ function productCard() {
       ${cur.SKU || cur.Barcode ? fact('Code', esc([cur.SKU, cur.Barcode].filter(Boolean).join(' · '))) : ''}
     </div>
     ${full && full.Description ? `<p class="pd-desc">${esc(full.Description)}</p>` : ''}
-    ${full && feature('OnlineShop') && canPhoto() ? `<label class="check pd-online"><input type="checkbox" data-act="pd-online" ${bool(full.ShowOnline) ? 'checked' : ''}> Show in the online shop${multi ? ' (all colours)' : ''}</label>` : ''}
+    ${full && feature('OnlineShop') && canPhoto() ? `<label class="check pd-online"><input type="checkbox" data-act="pd-online" ${bool(full.ShowOnline) ? 'checked' : ''}> Show in the online shop${multi ? ' (all ' + optCount(items).replace(/^\d+ /, '') + ')' : ''}</label>` : ''}
     <div class="pd-acts">
       ${canIntake ? `<button class="btn" data-act="pd-intake">${icon('box', 'sm')} Add stock</button>` : ''}
       ${can('STOCK_ADJUST') ? `<button class="btn" data-act="pd-count">${icon('check', 'sm')} Count</button>` : ''}
@@ -1467,7 +1512,7 @@ function pdPhotoChosen(file) {
   const pid = S.ui.pdSel; const p = productById(pid); if (!p || !file) return;
   if (!navigator.onLine) { toast('Uploading a photo needs internet', 'bad'); return; }
   S.ui.pdUploading = true; npSafeRefresh();
-  resizeImage(file, 900)
+  resizeImage(file, 800)
     .then((dataUrl) => adminCall('uploadImage', { productId: pid, dataUrl, name: pname(p) }))
     .then((r) => {
       p.ImageURL = r.url; persist.snap();
@@ -1477,9 +1522,41 @@ function pdPhotoChosen(file) {
     .catch((e) => toast(e.message, 'bad'))
     .then(() => { S.ui.pdUploading = false; if (modalFn === productCard) npSafeRefresh(); renderBg(); });
 }
+async function pdMoreChosen(files) {
+  const pid = S.ui.pdSel; const full = S.admin && (S.admin.products || []).find((x) => x.ProductID === pid);
+  if (!full) return;
+  if (!navigator.onLine) { toast('Uploading photos needs internet', 'bad'); return; }
+  let list = String(full.MoreImages || '').split(/[\s,]+/).filter((u) => /^https?:\/\//.test(u));
+  const room = 6 - list.length;
+  const pick = Array.from(files).slice(0, room);
+  if (files.length > room) toast('Only ' + room + ' more photo' + (room === 1 ? '' : 's') + ' fit (6 extra at most)', 'bad');
+  S.ui.pdUploading = true; npSafeRefresh();
+  try {
+    for (const file of pick) {
+      const dataUrl = await resizeImage(file, 800);
+      const r = await adminCall('uploadImage', { productId: '', dataUrl, name: pname(full) + ' extra' });
+      list.push(r.url);
+    }
+    await adminCall('upsertProduct', { productId: pid, moreImages: list.join('\n') });
+    full.MoreImages = list.join('\n'); S.ui.pdImg = list.length; S.shopAdmin = null;
+    toast(pick.length === 1 ? 'Photo added' : pick.length + ' photos added', 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+  S.ui.pdUploading = false; if (modalFn === productCard) npSafeRefresh();
+}
 const PD_ACTS = {
-  'pd-open': (el) => { S.ui.pdId = el.dataset.id; S.ui.pdSel = ''; showModal(productCard, true); },
-  'pd-sel': (el) => { S.ui.pdSel = el.dataset.id; refreshModal(); },
+  'pd-img': (el) => { S.ui.pdImg = +el.dataset.i; refreshModal(); },
+  'pd-more': () => { const f = $('#pd-more'); if (f) { f.value = ''; f.click(); } },
+  'pd-img-del': async () => {
+    const pid = S.ui.pdSel; const full = S.admin && (S.admin.products || []).find((x) => x.ProductID === pid);
+    if (!full || !confirm('Remove this photo?')) return;
+    const list = String(full.MoreImages || '').split(/[\s,]+/).filter((u) => /^https?:\/\//.test(u));
+    list.splice((S.ui.pdImg || 1) - 1, 1);
+    try { await adminCall('upsertProduct', { productId: pid, moreImages: list.join('\n') }); full.MoreImages = list.join('\n'); S.ui.pdImg = 0; S.shopAdmin = null; toast('Photo removed', 'ok'); }
+    catch (e) { toast(e.message, 'bad'); }
+    npSafeRefresh();
+  },
+  'pd-open': (el) => { S.ui.pdId = el.dataset.id; S.ui.pdSel = ''; S.ui.pdImg = 0; showModal(productCard, true); },
+  'pd-sel': (el) => { S.ui.pdSel = el.dataset.id; S.ui.pdImg = 0; refreshModal(); },
   'pd-photo': (el) => { const f = $(el.dataset.src === 'camera' ? '#pd-camera' : '#pd-gallery'); if (f) { f.value = ''; f.click(); } },
   'pd-intake': () => { const pid = S.ui.pdSel; closeModal(); lines = [{ productId: pid, qty: '', unitCost: '' }]; showModal(intakeModal, true); },
   'pd-count': () => { const p = productById(S.ui.pdSel); closeModal(); S.ui.cntQ = p ? p.Name : ''; S.ui.cntCat = ''; S.view = 'count'; render(); },
@@ -2327,9 +2404,10 @@ function groupModal() {
   return `<div class="modal-head"><h2>Put together as one product</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
     <form data-form="grp-save">
       <div class="field"><label>Product name (without the colour)</label><input name="name" type="text" required value="${esc(base)}"></div>
-      <p class="muted small">Each one keeps its own stock, price and sales history. Type its colour (and size if needed):</p>
+      <div class="field"><label>They differ by</label><select name="optionName">${OPTION_NAMES.map((o) => `<option ${o === (ps.find((p) => p.OptionName) || {}).OptionName ? 'selected' : ''}>${o}</option>`).join('')}</select></div>
+      <p class="muted small">Each one keeps its own stock, price and sales history. Type what makes each one different (and the size if needed):</p>
       <div class="grp-rows">${ps.map((p, i) => `<div class="grp-row"><span class="muted small">${esc(p.Name)}${optLabel(p) ? ' — ' + esc(optLabel(p)) : ''}</span>
-        <input name="c_${i}" type="text" placeholder="Colour" value="${esc(rest(p))}" maxlength="30"><input name="s_${i}" type="text" placeholder="Size (optional)" value="${esc(p.Size || '')}" maxlength="30"></div>`).join('')}</div>
+        <input name="c_${i}" type="text" placeholder="e.g. Blue, Floral" value="${esc(rest(p))}" maxlength="30"><input name="s_${i}" type="text" placeholder="Size (optional)" value="${esc(p.Size || '')}" maxlength="30"></div>`).join('')}</div>
       <button class="btn primary block" type="submit" style="margin-top:.8rem">Put together</button></form>`;
 }
 const GRP_ACTS = {
@@ -2349,7 +2427,7 @@ const GRP_FORMS = {
     const items = S.ui.grpSel.map((id, i) => ({ productId: id, colour: f.elements['c_' + i].value.trim(), size: f.elements['s_' + i].value.trim() }));
     const b = f.querySelector('[type=submit]'); b.disabled = true; b.textContent = 'Saving…';
     try {
-      await adminCall('groupProducts', { name: f.name.value.trim(), items });
+      await adminCall('groupProducts', { name: f.name.value.trim(), items, optionName: f.optionName.value });
       S.admin = await adminCall('adminData', {}); S.ui.grpSel = null; closeModal(); toast('Put together — one tile on the till now', 'ok'); render(); sync(false);
     } catch (e) { toast(e.message, 'bad'); b.disabled = false; b.textContent = 'Put together'; }
   }
@@ -2370,7 +2448,7 @@ function productForm(p) {
       <div class="grid3"><div class="field"><label>SKU</label><input name="sku" type="text" value="${esc(p.SKU || '')}"></div>
         <div class="field"><label>Barcode</label><input name="barcode" type="text" value="${esc(p.Barcode || '')}"></div>
         <div class="field"><label>Reorder level</label><input name="reorderLevel" type="number" step="any" value="${esc(p.ReorderLevel || '')}"></div></div>
-      ${p.GroupID ? `<div class="grid2"><div class="field"><label>Colour</label><input name="colour" type="text" value="${esc(p.Colour || '')}" maxlength="30"></div>
+      ${p.GroupID ? `<div class="grid2"><div class="field"><label>${esc(optWord(p))}</label><input name="colour" type="text" value="${esc(p.Colour || '')}" maxlength="30"></div>
         <div class="field"><label>Size</label><input name="size" type="text" value="${esc(p.Size || '')}" maxlength="30"></div></div>` : ''}
       <div class="grid2"><div class="field"><label>Yards in a full piece <span class="muted small">(empty = not sold by the piece)</span></label><input name="pieceYards" type="number" step="any" min="0" value="${esc(p.PieceYards || '')}"></div>
         <div class="field"><label>Price of a full piece</label><input name="piecePrice" type="number" step="any" min="0" value="${esc(p.PiecePrice || '')}"></div></div>
@@ -2406,10 +2484,10 @@ function newProductModal() {
       <div class="grid2"><div class="field"><label>Category</label><select name="category">${cats.map((c) => `<option ${c.Name === d.category ? 'selected' : ''}>${esc(c.Name)}</option>`).join('')}</select></div>
         <div class="field"><label>Sold by (unit)</label><input name="unit" type="text" list="np-units" value="${esc(d.unit)}"><datalist id="np-units">${['piece', 'yard', 'set', 'pair', 'dozen', 'roll', 'bundle'].map((u) => `<option value="${u}">`).join('')}</datalist></div></div>
       <div class="np-opts">
-        <label class="check"><input type="checkbox" data-act="np-flag" data-k="npHasVar" ${S.ui.npHasVar ? 'checked' : ''}> This product comes in <b>colours / sizes</b> (each with its own stock)</label>
-        <label class="check"><input type="checkbox" data-act="np-flag" data-k="npPiece" ${S.ui.npPiece ? 'checked' : ''}> Also sold as a <b>full piece</b> (e.g. 6 yards) at a piece price</label></div>
+        <label class="check"><input type="checkbox" data-act="np-flag" data-k="npHasVar" ${S.ui.npHasVar ? 'checked' : ''}><span>Comes in <b>colours, patterns, designs or sizes</b> — each with its own stock</span></label>
+        <label class="check"><input type="checkbox" data-act="np-flag" data-k="npPiece" ${S.ui.npPiece ? 'checked' : ''}><span>Also sold as a <b>full piece</b> (e.g. 6 yards) at a piece price</span></label></div>
       <div class="grid3"><div class="field"><label>Currency</label><select name="priceCurrency"><option ${d.currency === 'USD' ? 'selected' : ''}>USD</option><option ${d.currency === 'LRD' ? 'selected' : ''}>LRD</option></select></div>
-        ${S.ui.npHasVar && S.ui.npDiffPrice ? '<div class="field"><label>Prices</label><div class="muted small" style="padding-top:.6rem">set for each colour below</div></div><div></div>' : `<div class="field"><label>Selling price${S.ui.npPiece ? ' <span class="muted small">(per yard)</span>' : ''}</label><input name="sellingPrice" type="number" step="any" min="0" required inputmode="decimal"></div>
+        ${S.ui.npHasVar && S.ui.npDiffPrice ? `<div class="field"><label>Prices</label><div class="muted small" style="padding-top:.6rem">set for each ${esc((S.ui.npOptName || 'Colour').toLowerCase())} below</div></div><div></div>` : `<div class="field"><label>Selling price${S.ui.npPiece ? ' <span class="muted small">(per yard)</span>' : ''}</label><input name="sellingPrice" type="number" step="any" min="0" required inputmode="decimal"></div>
         ${can('VIEW_COST_PROFIT') ? `<div class="field"><label>Cost price <span class="muted small">(what you paid)</span></label><input name="costPrice" type="number" step="any" min="0" inputmode="decimal"></div>` : '<div></div>'}`}</div>
       ${S.ui.npPiece ? `<div class="grid2 np-piece"><div class="field"><label>Yards in a full piece</label><input name="pieceYards" type="number" step="any" min="0" inputmode="decimal" placeholder="6" required></div>
         <div class="field"><label>Price of a full piece</label><input name="piecePrice" type="number" step="any" min="0" inputmode="decimal" required></div></div>
@@ -2418,7 +2496,7 @@ function newProductModal() {
       ${stockMode && !S.ui.npHasVar ? `<div class="np-stock"><div class="field" style="margin:0"><label>Quantity in stock now</label><input name="qty" type="number" step="any" min="0" inputmode="decimal" class="bigin" placeholder="0"></div>
           <div class="field" style="margin:0"><label>Warn me when it gets down to</label><input name="reorderLevel" type="number" step="any" min="0" inputmode="decimal" placeholder="e.g. 3"></div></div>
           <p class="muted small" style="margin:.3rem 0 .6rem">Count what is on the shelf at ${esc(store().Name)}. Later changes: Stock → ${feature('Suppliers') ? 'Receive stock' : 'Add stock'} or Adjust / count.</p>`
-        : `<div class="field"><label>Warn me when ${S.ui.npHasVar ? 'a colour' : 'stock'} gets down to</label><input name="reorderLevel" type="number" step="any" min="0"></div>${store().StoreID === 'HQ' ? '<p class="muted small">Stock is added from a shop phone (Stock → Add stock).</p>' : ''}`}
+        : `<div class="field"><label>Warn me when ${S.ui.npHasVar ? 'one ' + esc((S.ui.npOptName || 'Colour').toLowerCase()) : 'stock'} gets down to</label><input name="reorderLevel" type="number" step="any" min="0"></div>${store().StoreID === 'HQ' ? '<p class="muted small">Stock is added from a shop phone (Stock → Add stock).</p>' : ''}`}
       ${shopOn ? `<div class="np-online"><label class="check" style="margin:0"><input type="checkbox" name="showOnline" ${d.showOnline ? 'checked' : ''}> Show in the online shop</label>
         <div class="field"><label>Description for customers <span class="muted small">(optional)</span></label><textarea name="description" rows="2" placeholder="Colour, size, material…"></textarea></div>
         <div class="grid2"><div class="field"><label>Label</label><select name="onlineTag"><option value="">None</option><option value="NEW">New</option><option value="FEATURED">Featured</option></select></div>
@@ -2434,18 +2512,20 @@ function newProductModal() {
 }
 const NP_ACTS = {
   'np-flag': (el) => { S.ui[el.dataset.k] = el.checked; if (el.dataset.k === 'npHasVar' && el.checked && !S.ui.npVars) S.ui.npVars = [{}, {}]; npRefresh(); },
+  'np-word': (el) => { npReadVars(); S.ui.npOptName = el.dataset.w; npRefresh(); },
+  'np-from-photos': () => { npReadVars(); const f = $('#np-multi'); f.value = ''; f.click(); },
   'np-vphoto': (el) => { npReadVars(); S.ui.npVarPhoto = +el.dataset.i; const f = $('#np-gallery'); f.value = ''; f.click(); },
   'np-var-add': () => { npReadVars(); S.ui.npVars.push({}); npRefresh(); const f = $('form[data-form=new-product]'); const n = f && f.elements['v_colour_' + (S.ui.npVars.length - 1)]; if (n) n.focus(); },
   'np-var-del': (el) => { npReadVars(); S.ui.npVars.splice(+el.dataset.i, 1); npRefresh(); },
-  'np-open': () => { S.ui.npPhoto = null; S.ui.npVars = null; S.ui.npHasVar = false; S.ui.npSizes = false; S.ui.npDiffPrice = false; S.ui.npPiece = false; showModal(newProductModal, true); setTimeout(() => { const n = $('.modal [name=name]'); if (n) n.focus(); }, 50); },
+  'np-open': () => { S.ui.npPhoto = null; S.ui.npVars = null; S.ui.npHasVar = false; S.ui.npSizes = false; S.ui.npDiffPrice = false; S.ui.npPiece = false; S.ui.npOptName = 'Colour'; showModal(newProductModal, true); setTimeout(() => { const n = $('.modal [name=name]'); if (n) n.focus(); }, 50); },
   'np-pick': (el) => { const f = $(el.dataset.src === 'camera' ? '#np-camera' : '#np-gallery'); f.value = ''; f.click(); },
   'np-photo-clear': () => { S.ui.npPhoto = null; npRefresh(); },
   'np-save': (el) => { S.ui.npAgain = !!el.dataset.again; const f = $('form[data-form=new-product]'); if (f.reportValidity()) f.requestSubmit(); }
 };
 /** Redraw the form without losing what was typed. */
-function npRefresh() {
+function npRefresh(skipRead) {
   const f = $('form[data-form=new-product]'); if (!f) return;
-  npReadVars();
+  if (!skipRead) npReadVars();
   const vals = {}; Array.from(f.elements).forEach((e) => { if (e.name && e.name.indexOf('v_') !== 0) vals[e.name] = e.type === 'checkbox' ? e.checked : e.value; });
   const open = f.querySelector('details') && f.querySelector('details').open;
   refreshModal();
@@ -2457,21 +2537,27 @@ function npVariantsBlock() {
   const rows = S.ui.npVars && S.ui.npVars.length ? S.ui.npVars : (S.ui.npVars = [{}, {}]);
   const sizes = !!S.ui.npSizes; const diff = !!S.ui.npDiffPrice; const cost = diff && can('VIEW_COST_PROFIT');
   const stockMode = openingStockMode();
-  const cols = ['Colour'].concat(sizes ? ['Size'] : [], stockMode ? ['Qty now'] : [], diff ? ['Price'] : [], cost ? ['Cost'] : []);
+  const word = S.ui.npOptName || 'Colour';
+  const cols = [word].concat(sizes ? ['Size'] : [], stockMode ? ['Qty now'] : [], diff ? ['Price'] : [], cost ? ['Cost'] : []);
+  const ph = (i) => (word === 'Colour' ? ['Blue', 'Red', 'Gold', 'Green'][i % 4] : word + ' ' + (i + 1));
   return `<div class="np-vars">
+    <div class="np-word"><span>They differ by</span><div class="seg">${OPTION_NAMES.map((o) => `<button type="button" class="${o === word ? 'on' : ''}" data-act="np-word" data-w="${o}">${o}</button>`).join('')}</div></div>
     <div class="row" style="gap:1rem;flex-wrap:wrap"><label class="check" style="margin:0"><input type="checkbox" data-act="np-flag" data-k="npSizes" ${sizes ? 'checked' : ''}> Sizes too</label>
       <label class="check" style="margin:0"><input type="checkbox" data-act="np-flag" data-k="npDiffPrice" ${diff ? 'checked' : ''}> Different price for each</label></div>
-    <div class="np-vgrid" style="--cols:${cols.length}"><span class="np-vh">Photo</span>${cols.map((c) => `<span class="np-vh">${c}</span>`).join('')}<span></span>
-      ${rows.map((r, i) => `<button type="button" class="np-vph ${r.photo ? 'has' : ''}" data-act="np-vphoto" data-i="${i}" title="Photo for this colour">${r.photo ? `<img src="${r.photo}" alt="">` : icon('camera', 'sm')}</button>
-        <input name="v_colour_${i}" type="text" placeholder="${['Blue', 'Red', 'Gold', 'Green'][i % 4]}" value="${esc(r.colour || '')}" maxlength="30">
-        ${sizes ? `<input name="v_size_${i}" type="text" list="np-sizes" placeholder="M" value="${esc(r.size || '')}" maxlength="30">` : ''}
-        ${stockMode ? `<input name="v_qty_${i}" type="number" step="any" min="0" inputmode="decimal" placeholder="0" value="${esc(r.qty || '')}">` : ''}
-        ${diff ? `<input name="v_price_${i}" type="number" step="any" min="0" inputmode="decimal" value="${esc(r.price || '')}">` : ''}
-        ${cost ? `<input name="v_cost_${i}" type="number" step="any" min="0" inputmode="decimal" value="${esc(r.cost || '')}">` : ''}
-        <button type="button" class="btn ghost icon sm" data-act="np-var-del" data-i="${i}" title="Remove" ${rows.length < 2 ? 'disabled' : ''}>${icon('trash', 'sm')}</button>`).join('')}
+    <div class="np-vgrid" style="--cols:${cols.length}"><div class="np-vhead"><span>Photo</span>${cols.map((c) => `<span>${c}</span>`).join('')}<span></span></div>
+      ${rows.map((r, i) => `<div class="np-vrow"><button type="button" class="np-vph ${r.photo ? 'has' : ''}" data-act="np-vphoto" data-i="${i}" title="Photo">${r.photo ? `<img src="${r.photo}" alt="">` : icon('camera', 'sm')}</button>
+        <label class="vf nm"><span>${esc(word)}</span><input name="v_colour_${i}" type="text" placeholder="${esc(ph(i))}" value="${esc(r.colour || '')}" maxlength="30"></label>
+        ${sizes ? `<label class="vf"><span>Size</span><input name="v_size_${i}" type="text" list="np-sizes" placeholder="M" value="${esc(r.size || '')}" maxlength="30"></label>` : ''}
+        ${stockMode ? `<label class="vf"><span>Qty now</span><input name="v_qty_${i}" type="number" step="any" min="0" inputmode="decimal" placeholder="0" value="${esc(r.qty || '')}"></label>` : ''}
+        ${diff ? `<label class="vf"><span>Price</span><input name="v_price_${i}" type="number" step="any" min="0" inputmode="decimal" value="${esc(r.price || '')}"></label>` : ''}
+        ${cost ? `<label class="vf"><span>Cost</span><input name="v_cost_${i}" type="number" step="any" min="0" inputmode="decimal" value="${esc(r.cost || '')}"></label>` : ''}
+        <button type="button" class="btn ghost icon sm np-del" data-act="np-var-del" data-i="${i}" title="Remove" ${rows.length < 2 ? 'disabled' : ''}>${icon('trash', 'sm')}</button></div>`).join('')}
     </div>
     <datalist id="np-sizes">${['XS', 'S', 'M', 'L', 'XL', 'XXL', 'Child', 'Adult', 'Free size'].map((u) => `<option value="${u}">`).join('')}</datalist>
-    <button type="button" class="btn sm" data-act="np-var-add">${icon('plus', 'sm')} Add ${sizes ? 'colour / size' : 'colour'}</button>
+    <div class="row" style="gap:.4rem;flex-wrap:wrap"><button type="button" class="btn sm" data-act="np-var-add">${icon('plus', 'sm')} Add ${word.toLowerCase()}${sizes ? ' / size' : ''}</button>
+      <button type="button" class="btn sm" data-act="np-from-photos">${icon('image', 'sm')} Add from photos</button></div>
+    <input type="file" id="np-multi" accept="image/*" multiple hidden>
+    <div class="muted small">Add from photos: pick a photo (or several) — each becomes a row named “${word === 'Colour' ? 'Design' : word} 1, 2, 3…”. Rename any time.</div>
   </div>`;
 }
 function npReadVars() {
@@ -2481,12 +2567,31 @@ function npReadVars() {
     return { colour: g('colour'), size: g('size'), qty: g('qty'), price: g('price'), cost: g('cost'), photo: r.photo || '' };
   });
 }
+/** "Add from photos": every photo becomes a row, named Design 1, 2, 3… (or Pattern/Style …). */
+async function npPhotosToRows(files) {
+  if (!files || !files.length) return;
+  npReadVars();
+  if (!S.ui.npOptName || S.ui.npOptName === 'Colour') S.ui.npOptName = 'Design';
+  const word = S.ui.npOptName;
+  const rows = S.ui.npVars || (S.ui.npVars = []);
+  let n = rows.reduce((m, r) => { const k = new RegExp('^' + word + ' (\\d+)$', 'i').exec(String(r.colour || '').trim()); return k ? Math.max(m, +k[1]) : m; }, 0);
+  for (const file of Array.from(files)) {
+    try {
+      const photo = await resizeImage(file, 800);
+      const empty = rows.find((r) => !String(r.colour || '').trim() && !r.photo);
+      const row = empty || (rows.push({}), rows[rows.length - 1]);
+      row.colour = word + ' ' + (++n); row.photo = photo;
+    } catch (e) { toast(e.message, 'bad'); }
+  }
+  npRefresh(true);
+  toast(files.length === 1 ? 'Added — tap "Add from photos" again for the next one' : files.length + ' added', 'ok');
+}
 function npPhotoChosen(file) {
   if (!file) return;
   const vi = S.ui.npVarPhoto; S.ui.npVarPhoto = null;
-  resizeImage(file, 900).then((dataUrl) => {
-    if (vi !== null && vi !== undefined) { npReadVars(); if (S.ui.npVars[vi]) S.ui.npVars[vi].photo = dataUrl; }
-    else S.ui.npPhoto = dataUrl;
+  resizeImage(file, 800).then((dataUrl) => {
+    if (vi !== null && vi !== undefined) { npReadVars(); if (S.ui.npVars[vi]) S.ui.npVars[vi].photo = dataUrl; npRefresh(true); return; }
+    S.ui.npPhoto = dataUrl;
     npRefresh();
   }).catch((e) => toast(e.message, 'bad'));
 }
@@ -2529,6 +2634,7 @@ const NP_FORMS = {
       }
       let prods;
       if (hasVar) {
+        body.optionName = S.ui.npOptName || 'Colour';
         const base = Object.assign({}, body); delete base.sellingPrice; delete base.costPrice; delete base.sku; delete base.barcode;
         for (let i = 0; i < vars.length; i++) {
           if (!vars[i].photo) continue;
@@ -2561,7 +2667,7 @@ const NP_FORMS = {
       const totalQty = items.reduce((a, x) => a + x.qty, 0);
       S.ui.npLast = { category: body.category, currency: body.priceCurrency, unit: body.unit, showOnline: body.showOnline !== false };
       S.shopAdmin = null;
-      if (S.view === 'admin' && S.admin) { S.admin.products = (S.admin.products || []).concat(prods); }
+      if (S.admin) { S.admin.products = (S.admin.products || []).filter((x) => !ids.has(x.ProductID)).concat(prods); }
       toast(prod.Name + ' added' + (prods.length > 1 ? ' in ' + prods.length + ' colours' : '') + (totalQty > 0 ? ' with ' + fmtQty(totalQty) + ' ' + prod.Unit : ''), 'ok');
       S.ui.npPhoto = null; S.ui.npVars = S.ui.npHasVar ? [{}, {}] : null; S.stockValue = null;
       if (again) { refreshModal(); const n = $('.modal [name=name]'); if (n) n.focus(); }
@@ -2656,7 +2762,9 @@ function closeModal() { modalFn = null; co = null; $('#modal-root').innerHTML = 
  * Events
  * ===================================================================== */
 const ACT = {
-  go: (el) => { S.view = el.dataset.view; S.ui.showCart = false; if (S.view === 'contracts') { S.ui.conEdit = null; S.ui.conId = null; } render(); if (S.view === 'reports' && !reportCache) loadReport(); if (S.view === 'contracts' && !S.contracts && S.session.token) loadContracts(); },
+  go: (el) => {
+    if (el.dataset.view !== S.view) { S.navStack = (S.navStack || []).filter((v) => v !== el.dataset.view); S.navStack.push(S.view); if (S.navStack.length > 15) S.navStack.shift(); armBack(); }
+    S.view = el.dataset.view; S.ui.showCart = false; if (S.view === 'contracts') { S.ui.conEdit = null; S.ui.conId = null; } render(); if (S.view === 'reports' && !reportCache) loadReport(); if (S.view === 'contracts' && !S.contracts && S.session.token) loadContracts(); },
   logout: () => { if (S.cart.lines.length && !confirm('Discard the current sale and log out?')) return; logout(); },
   'sync-now': () => sync(true),
   'pick-user': (el) => { loginUser = el.dataset.id || null; pinEntry = ''; render(); },
@@ -2685,14 +2793,8 @@ const ACT = {
   },
   remove: (el) => { S.cart.lines.splice(+el.dataset.i, 1); render(); },
   'clear-cart': () => { S.cart = { lines: [], discountUSD: 0, customerId: '' }; render(); },
-  'show-cart': () => {
-    S.ui.showCart = true; S.ui.sheetAnim = true; render();
-    try { if (!GAS) history.pushState({ sheet: 'cart' }, ''); } catch (e) { /* ignore */ }
-  },
-  'hide-cart': () => {
-    try { if (!GAS && history.state && history.state.sheet === 'cart') { history.back(); return; } } catch (e) { /* ignore */ }
-    S.ui.showCart = false; render();
-  },
+  'show-cart': () => { S.ui.showCart = true; S.ui.sheetAnim = true; render(); armBack(); },
+  'hide-cart': () => { S.ui.showCart = false; render(); },
   discount: () => {
     const t = cartTotals();
     const lim = num(setting('DiscountLimitPct'));
@@ -2876,13 +2978,15 @@ document.addEventListener('change', (e) => {
   if (k === 'color-custom') setPickerColor(el.closest('[data-picker]'), el.value);
   if (k === 'color-hex') { let v = el.value.trim(); if (v && v[0] !== '#') v = '#' + v; if (/^#[0-9a-f]{6}$/i.test(v)) setPickerColor(el.closest('[data-picker]'), v); }
   if ((el.id === 'np-gallery' || el.id === 'np-camera') && el.files && el.files[0]) npPhotoChosen(el.files[0]);
+  if (el.id === 'np-multi' && el.files && el.files.length) npPhotosToRows(el.files);
+  if (el.id === 'pd-more' && el.files && el.files.length) pdMoreChosen(el.files);
   if ((el.id === 'pd-gallery' || el.id === 'pd-camera') && el.files && el.files[0]) pdPhotoChosen(el.files[0]);
   if (el.id === 'photo-file' && el.files && el.files[0]) {
     const target = String(S.ui.photoFor || '');
     const more = target.indexOf('more:') === 0 ? target.slice(5) : '';
     const pid = target === 'logo' || target === 'banner' || more ? '' : target;
     toast('Uploading photo…');
-    resizeImage(el.files[0], target === 'banner' ? 1600 : target === 'logo' ? 800 : 900)
+    resizeImage(el.files[0], target === 'banner' ? 1600 : 800)
       .then((dataUrl) => adminCall('uploadImage', { productId: pid, dataUrl, name: target === 'logo' ? 'logo' : target === 'banner' ? 'banner' : ((productById(pid || more) || {}).Name || 'photo') }))
       .then(async (r) => {
         if (target === 'logo') { const b = await adminCall('updateBrand', { logo: r.url }); S.shopAdmin.brand = b.brand; render(); }
@@ -3356,7 +3460,7 @@ function emailModal() {
       <div class="row" style="gap:.5rem"><button class="btn ghost" type="button" data-act="doc-back">Back</button><button class="btn primary grow" type="submit">${icon('mail', 'sm')} Send</button></div></form>`;
 }
 
-Object.assign(ACT, INSTALL_ACTS, MONEY_ACTS, CAT_ACTS, NP_ACTS, PICK_ACTS, COUNT_ACTS, GRP_ACTS, PD_ACTS);
+Object.assign(ACT, INSTALL_ACTS, MONEY_ACTS, CAT_ACTS, NP_ACTS, PICK_ACTS, COUNT_ACTS, GRP_ACTS, PD_ACTS, BACK_ACTS);
 Object.assign(FORMS, MONEY_FORMS, CAT_FORMS, NP_FORMS, GRP_FORMS);
 Object.assign(ACT, {
   'doc-paper': (el) => { S.ui.doc.paper = el.dataset.p; refreshModal(); },
