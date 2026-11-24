@@ -174,7 +174,7 @@
     return `<a class="pcard${p.availability === 'OUT' ? ' soldout' : ''}" href="#" data-pid="${esc(p.id)}">
       <div class="media">${photo(p, 400)}${tagsHTML(p)}
         ${quick ? `<button type="button" class="qadd${inCart ? ' in' : ''}" ${p.isGroup ? `data-pid="${esc(p.id)}"` : `data-add="${esc(p.id)}"`} aria-label="${p.personalise ? 'Choose name for' : 'Add to cart:'} ${esc(p.name)}">${inCart ? icon('check') : icon('plus')}</button>` : ''}</div>
-      <span class="cat-l">${esc(p.category)}${p.isGroup ? ` · ${p.variants.length} ${p.variants.some((x) => x.colour) ? 'colours' : 'sizes'}` : ''}</span><span class="nm">${esc(p.name)}</span>${p.isGroup ? swatchRow(p) : ''}${priceHTML(p)}</a>`;
+      <span class="cat-l">${esc(p.category)}${p.isGroup ? ` · ${p.variants.length} ${p.variants.some((x) => x.colour) ? (p.variants[0].optName || 'Colour').toLowerCase() + 's' : 'sizes'}` : ''}</span><span class="nm">${esc(p.name)}</span>${p.isGroup && (!p.variants[0].optName || p.variants[0].optName === 'Colour') ? swatchRow(p) : ''}${priceHTML(p)}</a>`;
   }
   const SW = { red: '#dc2626', blue: '#2563eb', navy: '#1e3a8a', green: '#16a34a', yellow: '#facc15', gold: '#d4a017', orange: '#f97316', pink: '#ec4899', purple: '#7c3aed',
     black: '#111827', white: '#f9fafb', cream: '#f5f0dc', brown: '#7c4a1e', grey: '#9ca3af', gray: '#9ca3af', wine: '#7f1d1d', maroon: '#7f1d1d', teal: '#0d9488', beige: '#e7d8b5', peach: '#fdba74', lilac: '#c4b5fd' };
@@ -418,9 +418,11 @@
     const sizes = Array.from(new Set(vs.map((x) => x.size).filter(Boolean)));
     const allOut = (key, val) => vs.filter((x) => x[key] === val).every((x) => x.availability === 'OUT');
     const block = (title, key, vals) => vals.length ? `<div class="opts"><div class="opts-h">${title}: <b>${esc(cur[key] || '')}</b></div><div class="chips">${vals.map((v) => {
-      const sw = key === 'colour' ? swColour(v) : '';
-      return `<button type="button" class="chip${cur[key] === v ? ' on' : ''}${allOut(key, v) ? ' gone' : ''}" data-opt="${key}" data-val="${esc(v)}">${sw ? `<i style="background:${sw}"></i>` : ''}${esc(v)}</button>`; }).join('')}</div></div>` : '';
-    return block('Colour', 'colour', colours) + block('Size', 'size', sizes);
+      const vv = vs.find((x) => x[key] === v) || {};
+      const sw = key === 'colour' && vv.image && (vs[0].optName && vs[0].optName !== 'Colour') ? '' : key === 'colour' ? swColour(v) : '';
+      const thumb = key === 'colour' && vv.image && vs[0].optName && vs[0].optName !== 'Colour' ? `<img src="${esc(vv.image)}" alt="">` : '';
+      return `<button type="button" class="chip${cur[key] === v ? ' on' : ''}${allOut(key, v) ? ' gone' : ''}" data-opt="${key}" data-val="${esc(v)}">${thumb}${sw ? `<i style="background:${sw}"></i>` : ''}${esc(v)}</button>`; }).join('')}</div></div>` : '';
+    return block(vs[0].optName || 'Colour', 'colour', colours) + block('Size', 'size', sizes);
   }
   function checkoutView() {
     const d = S.data; const c = S.customer;
