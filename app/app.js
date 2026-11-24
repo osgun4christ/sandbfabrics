@@ -3,7 +3,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.7.1';
 const PIN_ROUNDS_DEFAULT = 100;
 const ICON_SRC = (typeof window !== 'undefined' && window.SM_ICON) || 'icons/icon-192.png';
 const AUTO_SYNC_MS = 120000;   // push + pull every 2 minutes while the app is open
@@ -133,6 +133,7 @@ const ICONS = {
   chat: '<path d="M21 11.5a8.4 8.4 0 0 1-12.4 7.4L3 21l2.1-5.4A8.5 8.5 0 1 1 21 11.5z"/>',
   bag: '<path d="M5 8h14l-1 13H6zM9 8V6a3 3 0 0 1 6 0v2"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
+  edit: '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/>',
   camera: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13" r="3.5"/>',
   link: '<path d="M10 14a4.5 4.5 0 0 0 6.4 0l3.2-3.2a4.5 4.5 0 0 0-6.4-6.4L12 5.6M14 10a4.5 4.5 0 0 0-6.4 0l-3.2 3.2a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2"/>',
   alert: '<path d="M12 3 2 20h20zM12 10v4M12 17.5v.5"/>'
@@ -784,7 +785,7 @@ function pickModal() {
     <div class="pick-list">${items.map((p) => {
       const q = stock[p.ProductID] || 0;
       const out = q <= 0 && !allowNeg;
-      const sw = colourSwatch(p.Colour);
+      const sw = p.ImageURL ? `<img class="pick-ph" src="${esc(imgSmall(p.ImageURL))}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : colourSwatch(p.Colour);
       const nPiece = inCart(p.ProductID, 'piece'), nUnit = inCart(p.ProductID, 'unit');
       const unitBtn = `<button class="pick-btn" data-act="pick-add" data-id="${esc(p.ProductID)}" data-m="unit" ${out ? 'disabled' : ''}>
           <span>${hasPiece(p) ? 'By the ' + esc(p.Unit || 'yard') : 'Add'}</span><b>${fmtCur(p.SellingPrice, p.PriceCurrency)}</b>${nUnit ? `<i>${fmtQty(nUnit)} in sale</i>` : ''}</button>`;
@@ -1157,7 +1158,8 @@ function adminShop() {
   const pick = d.options.filter((o) => o.Type === 'PICKUP');
   const shops = (S.snap.stores || []).filter((s) => s.Type === 'SHOP' && s.Status === 'ACTIVE');
   const q = (S.ui.shopQ || '').toLowerCase();
-  const prods = d.products.filter((p) => p.Status === 'ACTIVE' && (!q || p.Name.toLowerCase().indexOf(q) >= 0));
+  const prods = d.products.filter((p) => p.Status === 'ACTIVE' && (!q || pname(p).toLowerCase().indexOf(q) >= 0))
+    .sort((a, b) => pname(a).localeCompare(pname(b)));
   return `
   ${store().StoreID === 'HQ' ? `<div class="field" style="max-width:340px"><label>Shop</label><select data-input="shop-store">${shops.map((s) => `<option value="${esc(s.StoreID)}" ${s.StoreID === st.StoreID ? 'selected' : ''}>${esc(s.Code + ' ' + s.Name)}</option>`).join('')}</select></div>` : ''}
   <div class="rcols" style="margin-top:0">
@@ -1215,7 +1217,7 @@ function adminShop() {
     <p class="muted small">Tick to show a product online. Add a clear photo — it sells much better.</p>
     <div class="plist">${prods.map((p) => `<div class="list-item">
       ${p.ImageURL ? `<img class="pthumb" src="${esc(p.ImageURL)}" alt="" referrerpolicy="no-referrer">` : `<span class="pthumb ph">${esc(initials(p.Name))}</span>`}
-      <span class="grow"><b>${esc(p.Name)}</b> ${num(p.SalePrice) ? `<span class="badge bad">Sale ${fmtCur(p.SalePrice, p.PriceCurrency)}</span>` : ''}${p.OnlineTag ? ` <span class="badge info">${p.OnlineTag === 'NEW' ? 'New' : 'Featured'}</span>` : ''}${p.Personalise ? ' <span class="badge">Made to order</span>' : ''}
+      <span class="grow">${colourSwatch(p.Colour)}<b>${esc(pname(p))}</b> ${num(p.SalePrice) ? `<span class="badge bad">Sale ${fmtCur(p.SalePrice, p.PriceCurrency)}</span>` : ''}${p.OnlineTag ? ` <span class="badge info">${p.OnlineTag === 'NEW' ? 'New' : 'Featured'}</span>` : ''}${p.Personalise ? ' <span class="badge">Made to order</span>' : ''}
         <div class="muted small">${esc(p.Description || 'No description')}${(p.MoreImages || []).length ? ' · ' + (p.MoreImages.length + 1) + ' photos' : ''}</div></span>
       <label class="check" style="margin:0"><input type="checkbox" data-act="online-toggle" data-id="${esc(p.ProductID)}" ${p.ShowOnline ? 'checked' : ''}> Online</label>
       <button class="btn sm" data-act="photo-pick" data-id="${esc(p.ProductID)}">${icon('image', 'sm')} Photo</button>
@@ -1355,14 +1357,15 @@ function viewStock() {
     <div class="card st-list">${shown.map((g) => {
       const open = S.ui.stockOpen === g.id;
       const p = g.p;
-      const head = `<div class="st-row ${g.multi ? 'grp' : ''}" ${g.multi ? `data-act="stock-open" data-id="${esc(g.id)}"` : ''}>
-        <span class="st-dot ${g.state}"></span>
+      const thumb = (g.items.find((x) => x.ImageURL) || {}).ImageURL;
+      const head = `<div class="st-row grp" data-act="pd-open" data-id="${esc(g.id)}">
+        <span class="st-thumb">${thumb ? `<img src="${esc(imgSmall(thumb))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : `<b>${esc(initials(p.Name))}</b>`}<span class="st-dot ${g.state}"></span></span>
         <span class="grow"><b>${esc(g.multi ? p.Name : pname(p))}</b>
           <div class="muted small">${esc(p.Category)}${g.multi ? ` · ${g.items.length} ${g.items.some((x) => x.Size) && !g.items.some((x) => x.Colour) ? 'sizes' : 'colours'}` : ''}${g.out && g.multi && g.qty > 0 ? ` · <span class="bad-t">${g.out} sold out</span>` : ''}${g.low ? ` · <span class="warn-t">${g.low} low</span>` : ''}</div></span>
         <span class="right"><b class="st-q ${g.state}">${g.qty <= 0 ? 'None' : qtyTxt(g.qty, p)}</b>${!g.multi ? pieceTxt(g.qty, p) : ''}
           <div class="muted small">${g.multi && new Set(g.items.map((x) => x.SellingPrice)).size > 1 ? 'from ' + fmtCur(Math.min(...g.items.map((x) => num(x.SellingPrice))), p.PriceCurrency) : fmtCur(p.SellingPrice, p.PriceCurrency)}${hasPiece(p) ? ' / ' + esc(p.Unit || 'yd') : ''}</div></span>
-        ${g.multi ? `<span class="st-chev ${open ? 'open' : ''}">${icon('arrow', 'sm')}</span>` : ''}</div>`;
-      const kids = g.multi && open ? `<div class="st-kids">${g.items.slice().sort((a, b) => optLabel(a).localeCompare(optLabel(b))).map((x) => {
+        <span class="st-chev">${icon('arrow', 'sm')}</span></div>`;
+      const kids = false ? `<div class="st-kids">${g.items.slice().sort((a, b) => optLabel(a).localeCompare(optLabel(b))).map((x) => {
         const qx = stock[x.ProductID] || 0; const stt = qx <= 0 ? 'out' : qx <= num(x.ReorderLevel) ? 'low' : 'ok';
         return `<div class="st-row kid">${colourSwatch(x.Colour) || '<span class="st-dot ' + stt + '"></span>'}<span class="grow">${esc(optLabel(x))}<div class="muted small">${fmtCur(x.SellingPrice, x.PriceCurrency)}${x.SKU ? ' · ' + esc(x.SKU) : ''}</div></span>
           <span class="right"><b class="st-q ${stt}">${qx <= 0 ? 'None' : qtyTxt(qx, x)}</b>${pieceTxt(qx, x)}</span></div>`; }).join('')}</div>` : '';
@@ -1395,6 +1398,102 @@ async function loadStockValue() {
   try { S.stockValue = await adminCall('stockValue', { storeId: store().StoreID }); } catch (e) { if (e.code !== 'AUTH') toast(e.message, 'bad'); }
   S.ui.svLoading = false; renderBg();
 }
+
+const imgSmall = (u) => (/lh3\.googleusercontent\.com\/d\/[\w-]+$/.test(u) ? u + '=w300' : u);
+const imgBig = (u) => (/lh3\.googleusercontent\.com\/d\/[\w-]+$/.test(u) ? u + '=w900' : u);
+/* ---------- Product card: photo(s), stock per colour, prices, quick actions ---------- */
+function pdItems() {
+  const g = groupOf(S.ui.pdId);
+  const items = g.length ? g : [productById(S.ui.pdId)].filter(Boolean);
+  return items.sort((a, b) => optLabel(a).localeCompare(optLabel(b)));
+}
+const canPhoto = () => can('PRODUCT_MANAGE') || can('SHOP_MANAGE');
+function productCard() {
+  const items = pdItems();
+  if (!items.length) return `<div class="modal-head"><h2>Product</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div><div class="empty">Not found</div>`;
+  const cur = items.find((x) => x.ProductID === S.ui.pdSel) || items.find((x) => x.ImageURL && (stockMap()[x.ProductID] || 0) > 0) || items.find((x) => x.ImageURL) || items[0];
+  S.ui.pdSel = cur.ProductID;
+  const multi = items.length > 1 || !!cur.GroupID;
+  const stock = stockMap();
+  const q = stock[cur.ProductID] || 0;
+  const total = items.reduce((a, x) => a + (stock[x.ProductID] || 0), 0);
+  const full = S.admin && (S.admin.products || []).find((x) => x.ProductID === cur.ProductID);
+  if (!S.admin && !S.ui.pdLoading && S.session.token && navigator.onLine && (can('VIEW_COST_PROFIT') || can('PRODUCT_MANAGE'))) {
+    S.ui.pdLoading = true;
+    adminCall('adminData', {}).then((d) => { S.admin = d; }).catch(() => {}).then(() => { S.ui.pdLoading = false; if (modalFn === productCard) npSafeRefresh(); });
+  }
+  const img = cur.ImageURL || (items.find((x) => x.ImageURL) || {}).ImageURL || '';
+  const own = !!cur.ImageURL;
+  const cc = catColor(cur.Name);
+  const st = q <= 0 ? 'out' : q <= num(cur.ReorderLevel) ? 'low' : 'ok';
+  const pieces = hasPiece(cur) && q > 0 ? Math.floor(q / num(cur.PieceYards)) : 0;
+  const sale = num(cur.RegularPrice) > num(cur.SellingPrice);
+  const canIntake = can('STOCK_INTAKE') && !(store().Type === 'SHOP' && !bool(setting('ShopsBuyFromSuppliers')));
+  const fact = (k, v, cls) => `<div class="pd-f ${cls || ''}"><span>${k}</span><b>${v}</b></div>`;
+  return `<div class="modal-head"><h2>${esc(cur.Name)}</h2><button class="btn ghost icon" data-act="close">${icon('x')}</button></div>
+    <div class="pd-photo" style="--c1:${cc[0]};--c2:${cc[1]}">
+      ${img ? `<img src="${esc(imgBig(img))}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : `<b>${esc(initials(cur.Name))}</b>`}
+      ${multi ? `<span class="pd-tag">${esc(optLabel(cur))}${img && !own ? ' · showing another colour\'s photo' : ''}</span>` : ''}
+      ${canPhoto() ? `<div class="pd-pbtns"><button class="btn sm" data-act="pd-photo" data-src="gallery">${icon('image', 'sm')} ${own ? 'Change photo' : 'Add photo'}</button>
+        <button class="btn sm" data-act="pd-photo" data-src="camera" title="Take photo">${icon('camera', 'sm')}</button></div>` : ''}
+      ${S.ui.pdUploading ? '<div class="pd-busy">Uploading photo…</div>' : ''}
+    </div>
+    <input type="file" id="pd-gallery" accept="image/*" hidden><input type="file" id="pd-camera" accept="image/*" capture="environment" hidden>
+    ${multi ? `<div class="pd-strip">${items.map((x) => { const qx = stock[x.ProductID] || 0; return `<button class="pd-opt ${x.ProductID === cur.ProductID ? 'on' : ''} ${qx <= 0 ? 'out' : ''}" data-act="pd-sel" data-id="${esc(x.ProductID)}">
+        <span class="pd-ot">${x.ImageURL ? `<img src="${esc(imgSmall(x.ImageURL))}" alt="" referrerpolicy="no-referrer">` : colourSwatch(x.Colour) || '<i></i>'}</span>
+        <b>${esc(optLabel(x))}</b><small>${qx <= 0 ? 'none' : fmtQty(qx) + ' ' + esc(x.Unit || '')}</small></button>`; }).join('')}</div>
+      <div class="muted small" style="margin:-.2rem 0 .6rem">${items.length} ${items.some((x) => x.Size) && !items.some((x) => x.Colour) ? 'sizes' : 'colours'} · ${fmtQty(total)} ${esc(cur.Unit || '')} altogether. Tap a colour to see it.</div>` : ''}
+    <div class="pd-facts">
+      ${fact('In stock' + (multi ? ' — ' + esc(optLabel(cur)) : ''), q <= 0 ? 'None' : fmtQty(q) + ' ' + esc(cur.Unit || '') + (pieces ? ` <small>≈ ${pieces} full piece${pieces === 1 ? '' : 's'}</small>` : ''), st)}
+      ${fact('Price', (sale ? `<s class="muted">${fmtCur(cur.RegularPrice, cur.PriceCurrency)}</s> ` : '') + fmtCur(cur.SellingPrice, cur.PriceCurrency) + (cur.Unit ? ` <small>/ ${esc(cur.Unit)}</small>` : ''))}
+      ${hasPiece(cur) ? fact('Full piece', fmtQty(cur.PieceYards) + ' ' + esc(cur.Unit || 'yd') + ' = ' + fmtCur(cur.PiecePrice, cur.PriceCurrency)) : ''}
+      ${can('VIEW_COST_PROFIT') ? fact('Cost price', full ? (num(full.CostPrice) > 0 ? fmtCur(full.CostPrice, full.PriceCurrency) : '<span class="warn-t">not set</span>') : '…') : ''}
+      ${can('VIEW_COST_PROFIT') && full && q > 0 ? fact('Stock worth', `${num(full.CostPrice) > 0 ? fmtCur(q * num(full.CostPrice), full.PriceCurrency) + ' <small>cost</small> · ' : ''}${fmtCur(q * num(cur.SellingPrice), cur.PriceCurrency)} <small>selling</small>`) : ''}
+      ${fact('Warn when down to', fmtQty(cur.ReorderLevel || 0) + ' ' + esc(cur.Unit || ''))}
+      ${fact('Category', esc(cur.Category || ''))}
+      ${cur.SKU || cur.Barcode ? fact('Code', esc([cur.SKU, cur.Barcode].filter(Boolean).join(' · '))) : ''}
+    </div>
+    ${full && full.Description ? `<p class="pd-desc">${esc(full.Description)}</p>` : ''}
+    ${full && feature('OnlineShop') && canPhoto() ? `<label class="check pd-online"><input type="checkbox" data-act="pd-online" ${bool(full.ShowOnline) ? 'checked' : ''}> Show in the online shop${multi ? ' (all colours)' : ''}</label>` : ''}
+    <div class="pd-acts">
+      ${canIntake ? `<button class="btn" data-act="pd-intake">${icon('box', 'sm')} Add stock</button>` : ''}
+      ${can('STOCK_ADJUST') ? `<button class="btn" data-act="pd-count">${icon('check', 'sm')} Count</button>` : ''}
+      ${can('PRODUCT_MANAGE') ? `<button class="btn" data-act="pd-edit" ${full ? '' : 'disabled'}>${icon('edit', 'sm')} Edit details</button>` : ''}
+      <button class="btn primary" data-act="close">Done</button>
+    </div>`;
+}
+function npSafeRefresh() { try { refreshModal(); } catch (e) { /* ignore */ } }
+function pdPhotoChosen(file) {
+  const pid = S.ui.pdSel; const p = productById(pid); if (!p || !file) return;
+  if (!navigator.onLine) { toast('Uploading a photo needs internet', 'bad'); return; }
+  S.ui.pdUploading = true; npSafeRefresh();
+  resizeImage(file, 900)
+    .then((dataUrl) => adminCall('uploadImage', { productId: pid, dataUrl, name: pname(p) }))
+    .then((r) => {
+      p.ImageURL = r.url; persist.snap();
+      if (S.admin) { const a = (S.admin.products || []).find((x) => x.ProductID === pid); if (a) a.ImageURL = r.url; }
+      S.shopAdmin = null; toast('Photo saved for ' + pname(p), 'ok');
+    })
+    .catch((e) => toast(e.message, 'bad'))
+    .then(() => { S.ui.pdUploading = false; if (modalFn === productCard) npSafeRefresh(); renderBg(); });
+}
+const PD_ACTS = {
+  'pd-open': (el) => { S.ui.pdId = el.dataset.id; S.ui.pdSel = ''; showModal(productCard, true); },
+  'pd-sel': (el) => { S.ui.pdSel = el.dataset.id; refreshModal(); },
+  'pd-photo': (el) => { const f = $(el.dataset.src === 'camera' ? '#pd-camera' : '#pd-gallery'); if (f) { f.value = ''; f.click(); } },
+  'pd-intake': () => { const pid = S.ui.pdSel; closeModal(); lines = [{ productId: pid, qty: '', unitCost: '' }]; showModal(intakeModal, true); },
+  'pd-count': () => { const p = productById(S.ui.pdSel); closeModal(); S.ui.cntQ = p ? p.Name : ''; S.ui.cntCat = ''; S.view = 'count'; render(); },
+  'pd-edit': () => { const pid = S.ui.pdSel; const p = (S.admin.products || []).find((x) => x.ProductID === pid); if (p) showModal(() => productForm(p), true); },
+  'pd-online': async (el) => {
+    const on = el.checked; const items = pdItems(); el.disabled = true;
+    try {
+      for (const x of items) await adminCall('upsertProduct', { productId: x.ProductID, showOnline: on });
+      (S.admin.products || []).forEach((a) => { if (items.some((x) => x.ProductID === a.ProductID)) a.ShowOnline = on; });
+      S.shopAdmin = null; toast(on ? 'Now in the online shop' : 'Hidden from the online shop', 'ok');
+    } catch (e) { toast(e.message, 'bad'); el.checked = !on; }
+    el.disabled = false;
+  }
+};
 
 /* ---------- Count the shelf: type what you count, save once ---------- */
 function countDraft() {
@@ -2335,6 +2434,7 @@ function newProductModal() {
 }
 const NP_ACTS = {
   'np-flag': (el) => { S.ui[el.dataset.k] = el.checked; if (el.dataset.k === 'npHasVar' && el.checked && !S.ui.npVars) S.ui.npVars = [{}, {}]; npRefresh(); },
+  'np-vphoto': (el) => { npReadVars(); S.ui.npVarPhoto = +el.dataset.i; const f = $('#np-gallery'); f.value = ''; f.click(); },
   'np-var-add': () => { npReadVars(); S.ui.npVars.push({}); npRefresh(); const f = $('form[data-form=new-product]'); const n = f && f.elements['v_colour_' + (S.ui.npVars.length - 1)]; if (n) n.focus(); },
   'np-var-del': (el) => { npReadVars(); S.ui.npVars.splice(+el.dataset.i, 1); npRefresh(); },
   'np-open': () => { S.ui.npPhoto = null; S.ui.npVars = null; S.ui.npHasVar = false; S.ui.npSizes = false; S.ui.npDiffPrice = false; S.ui.npPiece = false; showModal(newProductModal, true); setTimeout(() => { const n = $('.modal [name=name]'); if (n) n.focus(); }, 50); },
@@ -2361,8 +2461,9 @@ function npVariantsBlock() {
   return `<div class="np-vars">
     <div class="row" style="gap:1rem;flex-wrap:wrap"><label class="check" style="margin:0"><input type="checkbox" data-act="np-flag" data-k="npSizes" ${sizes ? 'checked' : ''}> Sizes too</label>
       <label class="check" style="margin:0"><input type="checkbox" data-act="np-flag" data-k="npDiffPrice" ${diff ? 'checked' : ''}> Different price for each</label></div>
-    <div class="np-vgrid" style="--cols:${cols.length}">${cols.map((c) => `<span class="np-vh">${c}</span>`).join('')}<span></span>
-      ${rows.map((r, i) => `<input name="v_colour_${i}" type="text" placeholder="${['Blue', 'Red', 'Gold', 'Green'][i % 4]}" value="${esc(r.colour || '')}" maxlength="30">
+    <div class="np-vgrid" style="--cols:${cols.length}"><span class="np-vh">Photo</span>${cols.map((c) => `<span class="np-vh">${c}</span>`).join('')}<span></span>
+      ${rows.map((r, i) => `<button type="button" class="np-vph ${r.photo ? 'has' : ''}" data-act="np-vphoto" data-i="${i}" title="Photo for this colour">${r.photo ? `<img src="${r.photo}" alt="">` : icon('camera', 'sm')}</button>
+        <input name="v_colour_${i}" type="text" placeholder="${['Blue', 'Red', 'Gold', 'Green'][i % 4]}" value="${esc(r.colour || '')}" maxlength="30">
         ${sizes ? `<input name="v_size_${i}" type="text" list="np-sizes" placeholder="M" value="${esc(r.size || '')}" maxlength="30">` : ''}
         ${stockMode ? `<input name="v_qty_${i}" type="number" step="any" min="0" inputmode="decimal" placeholder="0" value="${esc(r.qty || '')}">` : ''}
         ${diff ? `<input name="v_price_${i}" type="number" step="any" min="0" inputmode="decimal" value="${esc(r.price || '')}">` : ''}
@@ -2377,12 +2478,17 @@ function npReadVars() {
   const f = $('form[data-form=new-product]'); if (!f || !S.ui.npVars) return;
   S.ui.npVars = S.ui.npVars.map((r, i) => {
     const g = (k) => (f.elements['v_' + k + '_' + i] ? f.elements['v_' + k + '_' + i].value : r[k] || '');
-    return { colour: g('colour'), size: g('size'), qty: g('qty'), price: g('price'), cost: g('cost') };
+    return { colour: g('colour'), size: g('size'), qty: g('qty'), price: g('price'), cost: g('cost'), photo: r.photo || '' };
   });
 }
 function npPhotoChosen(file) {
   if (!file) return;
-  resizeImage(file, 900).then((dataUrl) => { S.ui.npPhoto = dataUrl; npRefresh(); }).catch((e) => toast(e.message, 'bad'));
+  const vi = S.ui.npVarPhoto; S.ui.npVarPhoto = null;
+  resizeImage(file, 900).then((dataUrl) => {
+    if (vi !== null && vi !== undefined) { npReadVars(); if (S.ui.npVars[vi]) S.ui.npVars[vi].photo = dataUrl; }
+    else S.ui.npPhoto = dataUrl;
+    npRefresh();
+  }).catch((e) => toast(e.message, 'bad'));
 }
 const NP_FORMS = {
   'new-product': async (f) => {
@@ -2424,7 +2530,14 @@ const NP_FORMS = {
       let prods;
       if (hasVar) {
         const base = Object.assign({}, body); delete base.sellingPrice; delete base.costPrice; delete base.sku; delete base.barcode;
-        const r = await adminCall('createVariants', { base, variants: vars.map((x) => ({ colour: x.colour.trim(), size: String(x.size || '').trim(),
+        for (let i = 0; i < vars.length; i++) {
+          if (!vars[i].photo) continue;
+          busy.textContent = 'Uploading photo ' + (i + 1) + '…';
+          try { vars[i].imageUrl = (await adminCall('uploadImage', { productId: '', dataUrl: vars[i].photo, name: body.name + ' ' + vars[i].colour })).url; }
+          catch (e) { toast('Photo for ' + vars[i].colour + ' did not upload — add it later from Stock', 'bad'); }
+        }
+        busy.textContent = 'Saving…';
+        const r = await adminCall('createVariants', { base, variants: vars.map((x) => ({ colour: x.colour.trim(), size: String(x.size || '').trim(), imageUrl: x.imageUrl || undefined,
           sellingPrice: diff ? num(x.price) : body.sellingPrice, costPrice: diff ? (x.cost !== '' ? num(x.cost) : undefined) : body.costPrice })) });
         prods = r.products;
       } else prods = [(await adminCall('upsertProduct', body)).product];
@@ -2763,6 +2876,7 @@ document.addEventListener('change', (e) => {
   if (k === 'color-custom') setPickerColor(el.closest('[data-picker]'), el.value);
   if (k === 'color-hex') { let v = el.value.trim(); if (v && v[0] !== '#') v = '#' + v; if (/^#[0-9a-f]{6}$/i.test(v)) setPickerColor(el.closest('[data-picker]'), v); }
   if ((el.id === 'np-gallery' || el.id === 'np-camera') && el.files && el.files[0]) npPhotoChosen(el.files[0]);
+  if ((el.id === 'pd-gallery' || el.id === 'pd-camera') && el.files && el.files[0]) pdPhotoChosen(el.files[0]);
   if (el.id === 'photo-file' && el.files && el.files[0]) {
     const target = String(S.ui.photoFor || '');
     const more = target.indexOf('more:') === 0 ? target.slice(5) : '';
@@ -3242,7 +3356,7 @@ function emailModal() {
       <div class="row" style="gap:.5rem"><button class="btn ghost" type="button" data-act="doc-back">Back</button><button class="btn primary grow" type="submit">${icon('mail', 'sm')} Send</button></div></form>`;
 }
 
-Object.assign(ACT, INSTALL_ACTS, MONEY_ACTS, CAT_ACTS, NP_ACTS, PICK_ACTS, COUNT_ACTS, GRP_ACTS);
+Object.assign(ACT, INSTALL_ACTS, MONEY_ACTS, CAT_ACTS, NP_ACTS, PICK_ACTS, COUNT_ACTS, GRP_ACTS, PD_ACTS);
 Object.assign(FORMS, MONEY_FORMS, CAT_FORMS, NP_FORMS, GRP_FORMS);
 Object.assign(ACT, {
   'doc-paper': (el) => { S.ui.doc.paper = el.dataset.p; refreshModal(); },

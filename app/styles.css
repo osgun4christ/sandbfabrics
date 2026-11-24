@@ -760,3 +760,37 @@ tr.in-grp td:first-child .swatch, tr.in-grp td .swatch { width: 14px; height: 14
 @media (max-width: 760px) { .sv-grid { grid-template-columns: 1fr; } }
 .cnt-row .grow { min-width: 0; }
 .cnt-row input.cnt-in { width: 88px; min-width: 88px; max-width: 88px; flex: 0 0 88px; padding: .5rem .3rem; }
+
+/* v1.9.1 product card */
+.st-thumb { position: relative; width: 46px; height: 46px; border-radius: 12px; flex: none; overflow: hidden; display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--brand-tint), var(--surface-2)); color: var(--brand-ink); font-size: .8rem; }
+.st-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.st-thumb .st-dot { position: absolute; right: 3px; bottom: 3px; width: 10px; height: 10px; border: 2px solid var(--surface); }
+.pd-photo { position: relative; aspect-ratio: 4 / 3; max-height: 46vh; width: 100%; border-radius: 18px; overflow: hidden; display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--c1, #ddd), var(--c2, #bbb)); margin-bottom: .7rem; }
+.pd-photo img { width: 100%; height: 100%; object-fit: cover; position: absolute; inset: 0; }
+.pd-photo > b { font-size: 3rem; color: rgba(255,255,255,.9); }
+.pd-tag { position: absolute; left: 10px; top: 10px; background: rgba(17,24,39,.75); color: #fff; font-size: .78rem; font-weight: 700; padding: .25rem .6rem; border-radius: 999px; }
+.pd-pbtns { position: absolute; right: 10px; bottom: 10px; display: flex; gap: .35rem; }
+.pd-pbtns .btn { background: rgba(255,255,255,.95); box-shadow: 0 4px 14px rgba(0,0,0,.2); border: 0; }
+.pd-busy { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(255,255,255,.75); font-weight: 700; }
+.pd-strip { display: flex; gap: .45rem; overflow-x: auto; padding: .1rem .1rem .5rem; margin-bottom: .2rem; scrollbar-width: none; }
+.pd-opt { flex: none; display: flex; flex-direction: column; align-items: center; gap: .15rem; width: 78px; padding: .4rem .3rem; border-radius: 14px; border: 1.5px solid var(--line);
+  background: var(--surface); font: inherit; cursor: pointer; color: var(--text); }
+.pd-opt.on { border-color: var(--brand); box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 30%, transparent); }
+.pd-opt.out { opacity: .6; }
+.pd-opt b { font-size: .8rem; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pd-opt small { font-size: .7rem; color: var(--muted); }
+.pd-ot { width: 44px; height: 44px; border-radius: 10px; overflow: hidden; display: grid; place-items: center; background: var(--surface-2); }
+.pd-ot img { width: 100%; height: 100%; object-fit: cover; } .pd-ot .swatch { width: 28px; height: 28px; }
+.pd-facts { display: grid; grid-template-columns: 1fr 1fr; gap: .45rem; }
+.pd-f { background: var(--surface-2); border-radius: 12px; padding: .55rem .7rem; display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+.pd-f span { font-size: .72rem; color: var(--muted); font-weight: 600; } .pd-f b { font-size: .98rem; } .pd-f small { font-weight: 500; color: var(--muted); }
+.pd-f.ok b { color: #047857; } .pd-f.low b { color: #b45309; } .pd-f.out b { color: #b91c1c; }
+.pd-desc { margin: .7rem 0 0; font-size: .92rem; color: var(--text-2, inherit); }
+.pd-online { margin: .7rem 0 0; }
+.pd-acts { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .9rem; } .pd-acts .btn { flex: 1 1 auto; }
+.pick-ph { width: 40px; height: 40px; border-radius: 10px; object-fit: cover; flex: none; }
+.np-vgrid { grid-template-columns: 40px repeat(var(--cols), minmax(0, 1fr)) 36px !important; }
+.np-vph { width: 38px; height: 38px; border-radius: 10px; border: 1.5px dashed var(--line); background: var(--surface); display: grid; place-items: center; cursor: pointer; padding: 0; overflow: hidden; color: var(--muted); }
+.np-vph.has { border-style: solid; border-color: var(--brand); } .np-vph img { width: 100%; height: 100%; object-fit: cover; }
+#shop-admin .swatch, .list-item .grow > .swatch { width: 14px; height: 14px; display: inline-block; vertical-align: -2px; margin-right: .35rem; }
